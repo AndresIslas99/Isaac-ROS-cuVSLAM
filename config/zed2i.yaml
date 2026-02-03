@@ -75,7 +75,7 @@
     # ── Sensors (IMU) ──
     sensors:
       sensors_image_sync:          true
-      publish_imu_tf:              false           # cuVSLAM manages this
+      publish_imu_tf:              true            # cuVSLAM needs zed_imu_link frame
       sensors_timestamp_sync:      false
 
     # ── Topics (what ZED publishes) ──

@@ -114,8 +114,9 @@ def generate_launch_description():
             'container_name': 'slam_container',
             'ros_params_override_path': os.path.join(pkg_agv_slam, 'config', 'zed2i.yaml'),
             'publish_urdf': 'true',
-            'publish_tf': 'false',
+            'publish_tf': 'true',
             'publish_map_tf': 'false',
+            'publish_imu_tf': 'true',
         }.items()
     )
 
@@ -364,7 +365,7 @@ def generate_launch_description():
             '--pitch', '0.087',  # ~5 deg downward tilt (0.087 rad)
             '--yaw', '0.0',
             '--frame-id', 'base_link',
-            '--child-frame-id', 'zed2i_base_link',
+            '--child-frame-id', 'zed_camera_link',
         ],
     )
 
@@ -407,5 +408,5 @@ def generate_launch_description():
         rviz_node,
 
         LogInfo(msg='=== All nodes launched. Monitor: /slam/diagnostics ==='),
-        LogInfo(msg='=== Foxglove: ws://192.168.50.100:8765 (if enabled) ==='),
+        LogInfo(msg='=== Foxglove: ws://192.168.55.1:8765 (if enabled) ==='),
     ])

@@ -14,7 +14,7 @@
 set -e
 
 JETSON_USER="orza"
-JETSON_HOST="192.168.50.100"
+JETSON_HOST="192.168.55.1"
 JETSON_SSH="${JETSON_USER}@${JETSON_HOST}"
 FOXGLOVE_URL="foxglove-studio-demo://open?ds=foxglove-websocket&ds.url=ws%3A%2F%2F${JETSON_HOST}%3A8765"
 WS_URL="ws://${JETSON_HOST}:8765"
