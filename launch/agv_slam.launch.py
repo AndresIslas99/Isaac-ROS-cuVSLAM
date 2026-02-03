@@ -26,18 +26,12 @@ from launch.actions import (
     GroupAction,
     TimerAction,
     LogInfo,
-    RegisterEventHandler,
 )
 from launch.conditions import IfCondition, UnlessCondition
-from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import (
-    LaunchConfiguration,
-    PathJoinSubstitution,
-    PythonExpression,
-)
-from launch_ros.actions import Node, SetParameter
-from launch_ros.substitutions import FindPackageShare
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node, SetParameter, LoadComposableNodes, ComposableNodeContainer
+from launch_ros.descriptions import ComposableNode
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -76,11 +70,39 @@ def generate_launch_description():
         'CYCLONEDDS_URI',
         os.path.join(pkg_agv_slam, 'config', 'cyclonedds.xml'))
 
+    # Isaac ROS GXF libraries needed by cuVSLAM
+    gxf_lib_base = os.path.join(
+        get_package_share_directory('isaac_ros_gxf'), 'gxf', 'lib')
+    gxf_lib_paths = ':'.join([
+        os.path.join(gxf_lib_base, d)
+        for d in ['core', 'std', 'cuda', 'serialization', 'multimedia',
+                  'npp', 'network', 'behavior_tree']
+        if os.path.isdir(os.path.join(gxf_lib_base, d))
+    ])
+    existing_ld = os.environ.get('LD_LIBRARY_PATH', '')
+    set_gxf_libs = SetEnvironmentVariable(
+        'LD_LIBRARY_PATH',
+        gxf_lib_paths + ':' + existing_ld if existing_ld else gxf_lib_paths)
+
     # ── Global sim time ──
     set_sim_time = SetParameter('use_sim_time', LaunchConfiguration('use_sim_time'))
 
     # ══════════════════════════════════════════════
-    # 1. ZED 2i CAMERA NODE
+    # 1. SLAM CONTAINER (shared by ZED + cuVSLAM)
+    # ══════════════════════════════════════════════
+    # Both ZED and cuVSLAM run in the same container for intra-process
+    # zero-copy image transport (NITROS-compatible).
+    slam_container = ComposableNodeContainer(
+        name='slam_container',
+        namespace='zed',
+        package='rclcpp_components',
+        executable='component_container_mt',
+        composable_node_descriptions=[],
+        output='screen',
+    )
+
+    # ══════════════════════════════════════════════
+    # 2. ZED 2i CAMERA NODE (loaded into slam_container)
     # ══════════════════════════════════════════════
     zed_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -89,13 +111,16 @@ def generate_launch_description():
         launch_arguments={
             'camera_model': 'zed2i',
             'camera_name': 'zed',
-            'config_path': os.path.join(pkg_agv_slam, 'config', 'zed2i.yaml'),
+            'container_name': 'slam_container',
+            'ros_params_override_path': os.path.join(pkg_agv_slam, 'config', 'zed2i.yaml'),
             'publish_urdf': 'true',
+            'publish_tf': 'false',
+            'publish_map_tf': 'false',
         }.items()
     )
 
     # ══════════════════════════════════════════════
-    # 2. DEPTH FILTER NODE (C++) — with respawn
+    # 3. DEPTH FILTER NODE (C++) — with respawn
     # ══════════════════════════════════════════════
     # Waits 3s for ZED to initialize
     depth_filter_node = TimerAction(
@@ -109,11 +134,11 @@ def generate_launch_description():
                     os.path.join(pkg_agv_slam, 'config', 'depth_filter.yaml'),
                 ],
                 remappings=[
-                    # Input from ZED
+                    # Input from ZED — topic names match ZED SDK v5.1+
                     ('/zed/zed_node/depth/depth_registered',
                      '/zed/zed_node/depth/depth_registered'),
                     ('/zed/zed_node/rgb/image_rect_color',
-                     '/zed/zed_node/rgb/image_rect_color'),
+                     '/zed/zed_node/rgb/color/rect/image'),
                 ],
                 output='screen',
                 arguments=['--ros-args', '--log-level', 'info'],
@@ -124,31 +149,34 @@ def generate_launch_description():
     )
 
     # ══════════════════════════════════════════════
-    # 3. ISAAC ROS cuVSLAM (GPU Visual-Inertial Odometry) — with respawn
+    # 4. ISAAC ROS cuVSLAM (GPU Visual-Inertial Odometry)
     # ══════════════════════════════════════════════
-    # Waits 5s for ZED to be fully publishing
-    cuvslam_node = TimerAction(
+    # Loaded into slam_container for intra-process zero-copy transport.
+    # Waits 5s for ZED to be fully publishing.
+    load_cuvslam = TimerAction(
         period=5.0,
         actions=[
-            Node(
-                package='isaac_ros_visual_slam',
-                executable='visual_slam_node',
-                name='visual_slam',
-                parameters=[
-                    os.path.join(pkg_agv_slam, 'config', 'cuvslam.yaml'),
+            LoadComposableNodes(
+                target_container='/zed/slam_container',
+                composable_node_descriptions=[
+                    ComposableNode(
+                        package='isaac_ros_visual_slam',
+                        plugin='nvidia::isaac_ros::visual_slam::VisualSlamNode',
+                        name='visual_slam',
+                        parameters=[
+                            os.path.join(pkg_agv_slam, 'config', 'cuvslam.yaml'),
+                        ],
+                        remappings=[
+                            # Stereo input from ZED (rectified grayscale) — ZED SDK v5.1+
+                            ('visual_slam/image_0', '/zed/zed_node/left/gray/rect/image'),
+                            ('visual_slam/camera_info_0', '/zed/zed_node/left/gray/rect/camera_info'),
+                            ('visual_slam/image_1', '/zed/zed_node/right/gray/rect/image'),
+                            ('visual_slam/camera_info_1', '/zed/zed_node/right/gray/rect/camera_info'),
+                            # IMU input
+                            ('visual_slam/imu', '/zed/zed_node/imu/data'),
+                        ],
+                    ),
                 ],
-                remappings=[
-                    # Stereo input from ZED (rectified grayscale)
-                    ('visual_slam/image_0', '/zed/zed_node/left/image_rect_gray'),
-                    ('visual_slam/camera_info_0', '/zed/zed_node/left/camera_info'),
-                    ('visual_slam/image_1', '/zed/zed_node/right/image_rect_gray'),
-                    ('visual_slam/camera_info_1', '/zed/zed_node/right/camera_info'),
-                    # IMU input
-                    ('visual_slam/imu', '/zed/zed_node/imu/data'),
-                ],
-                output='screen',
-                respawn=True,
-                respawn_delay=5.0,
             ),
         ]
     )
@@ -173,13 +201,7 @@ def generate_launch_description():
                     os.path.join(pkg_agv_slam, 'config', 'rtabmap.yaml'),
                     {
                         'database_path': LaunchConfiguration('database_path'),
-                        # Localization mode: load existing map, don't add new nodes
-                        'Mem/IncrementalMemory':
-                            PythonExpression([
-                                "'false' if '",
-                                LaunchConfiguration('localization'),
-                                "' == 'true' else 'true'"
-                            ]),
+                        'Mem/IncrementalMemory': 'true',
                     },
                 ],
                 remappings=[
@@ -342,14 +364,16 @@ def generate_launch_description():
         # Environment
         set_dds,
         set_cyclone_config,
+        set_gxf_libs,
         set_sim_time,
 
         # Pipeline
         LogInfo(msg='=== AGV SLAM Industrial Pipeline Starting ==='),
         static_tf_base_to_camera,
+        slam_container,
         zed_node,
         depth_filter_node,
-        cuvslam_node,
+        load_cuvslam,
 
         # Choose mapping or localization mode
         GroupAction(

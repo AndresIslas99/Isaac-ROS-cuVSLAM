@@ -539,15 +539,7 @@ void SlamGuiNode::cloud_callback(
   sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
   sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
 
-  bool has_rgb = false;
-  sensor_msgs::PointCloud2ConstIterator<uint8_t> iter_rgb(*msg, "rgb");
-  // Check if rgb field exists by trying to read
-  try {
-    sensor_msgs::PointCloud2ConstIterator<uint8_t> test(*msg, "rgb");
-    has_rgb = true;
-  } catch (...) {
-    has_rgb = false;
-  }
+  // Note: RGB field in point cloud not used — height-based coloring instead
 
   points.reserve(count / step * 3);
   colors.reserve(count / step * 3);

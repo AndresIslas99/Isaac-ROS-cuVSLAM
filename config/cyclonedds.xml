@@ -5,7 +5,6 @@
   Why CycloneDDS over FastDDS:
   - Better handling of large messages (images, point clouds)
   - Lower latency for intra-process communication
-  - Shared memory transport on Jetson
   - More predictable QoS behavior
 
   Set in environment:
@@ -17,14 +16,15 @@
             xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
   <Domain id="any">
     <General>
-      <!-- Localhost only: all nodes on same Jetson -->
-      <Interfaces>
-        <NetworkInterface name="lo" />
-      </Interfaces>
       <AllowMulticast>default</AllowMulticast>
       <MaxMessageSize>65500B</MaxMessageSize>
       <FragmentSize>32768B</FragmentSize>
     </General>
+
+    <Discovery>
+      <LeaseDuration>30s</LeaseDuration>
+      <MaxAutoParticipantIndex>120</MaxAutoParticipantIndex>
+    </Discovery>
 
     <Internal>
       <!-- Production buffers: 26MB to match sysctl setting -->
@@ -32,15 +32,7 @@
       <Watermarks>
         <WhcHigh>500kB</WhcHigh>
       </Watermarks>
-      <!-- Reduce discovery overhead -->
-      <LeaseDuration>30s</LeaseDuration>
     </Internal>
-
-    <!-- Shared memory transport: zero-copy between nodes -->
-    <SharedMemory>
-      <Enable>true</Enable>
-      <LogLevel>warning</LogLevel>
-    </SharedMemory>
 
     <Tracing>
       <OutputFile>/tmp/cyclonedds.log</OutputFile>

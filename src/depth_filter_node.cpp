@@ -59,7 +59,7 @@ DepthFilterNode::DepthFilterNode(const rclcpp::NodeOptions & options)
   cam_info_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(
     "/filtered/camera_info", rclcpp::SensorDataQoS());
   cam_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
-    "/zed/zed_node/rgb/camera_info", rclcpp::SensorDataQoS(),
+    "/zed/zed_node/rgb/color/rect/camera_info", rclcpp::SensorDataQoS(),
     [this](const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
       cam_info_pub_->publish(*msg);
     });

@@ -34,6 +34,6 @@
 
     # ── Topics ──
     input_depth_topic:           '/zed/zed_node/depth/depth_registered'
-    input_rgb_topic:             '/zed/zed_node/rgb/image_rect_color'
+    input_rgb_topic:             '/zed/zed_node/rgb/color/rect/image'
     output_depth_topic:          '/filtered/depth'
     output_rgb_topic:            '/filtered/rgb'

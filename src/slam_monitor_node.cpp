@@ -110,7 +110,7 @@ void SlamMonitorNode::publish_diagnostics()
 
   if (rgb_hz < 10.0) { healthy = false; issues += "RGB low; "; }
   if (depth_hz < 10.0) { healthy = false; issues += "Depth low; "; }
-  if (imu_hz < 100.0) { healthy = false; issues += "IMU low; "; }
+  if (imu_hz < 10.0) { healthy = false; issues += "IMU low; "; }
   if (odom_hz < 10.0) { healthy = false; issues += "cuVSLAM odom low; "; }
 
   sensor_status.level = healthy ?

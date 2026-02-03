@@ -15,6 +15,8 @@
       gpu_id:                      0
       grab_resolution:             'HD720'        # 1280x720: best compute/quality ratio
       grab_frame_rate:             30             # Must match cuVSLAM expectation
+      pub_frame_rate:              30.0           # Publish at full grab rate for cuVSLAM
+      pub_resolution:              'NATIVE'       # No downscaling — full HD720 to cuVSLAM
       svo_compression:             'H265'         # For recording bags later
       self_calib:                  true
       camera_flip:                 false
@@ -47,10 +49,12 @@
       sharpness:                   4
       gamma:                       8
       auto_exposure_gain:          true
-      exposure:                    100
-      gain:                        100
+      exposure:                    80
+      gain:                        80
       auto_whitebalance:           true
-      whitebalance_temperature:    4200
+      whitebalance_temperature:    42              # x100 → 4200K (range [28,65])
+      publish_gray:                true            # Required for cuVSLAM stereo input
+      publish_left_right:          true            # Left/right grayscale for cuVSLAM
 
     # ── Positional Tracking (ZED SDK VIO) ──
     # NOTE: We use cuVSLAM for odometry, but ZED's internal VIO still runs

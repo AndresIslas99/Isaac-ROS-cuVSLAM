@@ -21,7 +21,13 @@ find_package(tf2 REQUIRED)
 find_package(OpenCV REQUIRED)
 
 # ── Optional: CUDA for GPU depth filter ──
-find_package(CUDA QUIET)
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+  set(CUDA_AVAILABLE TRUE)
+else()
+  set(CUDA_AVAILABLE FALSE)
+endif()
 
 # ── Optional: Qt5 for GUI ──
 find_package(Qt5 QUIET COMPONENTS Widgets OpenGL)
@@ -103,7 +109,7 @@ ament_target_dependencies(map_quality_node
 # ══════════════════════════════════════════════
 # CUDA Depth Filter Library (optional)
 # ══════════════════════════════════════════════
-if(CUDA_FOUND)
+if(CUDA_AVAILABLE)
   message(STATUS "CUDA found: Building GPU depth filter kernels")
   enable_language(CUDA)
   set(CMAKE_CUDA_STANDARD 14)
@@ -139,8 +145,14 @@ if(Qt5_FOUND)
   message(STATUS "Qt5 found: Building SLAM GUI")
   set(CMAKE_AUTOMOC ON)
 
+  # MOC needs to find the Q_OBJECT headers
+  qt5_wrap_cpp(SLAM_GUI_MOC_SRCS
+    include/agv_slam/slam_gui_node.hpp
+  )
+
   add_executable(slam_gui_node
     src/slam_gui_node.cpp
+    ${SLAM_GUI_MOC_SRCS}
   )
   target_include_directories(slam_gui_node PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
