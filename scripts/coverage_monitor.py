@@ -1,26 +1,37 @@
 #!/usr/bin/env python3
 # =============================================================================
-# Coverage Monitor Node
+# Coverage Monitor Node — FOV-Based Coverage Tracking
 # =============================================================================
-# Subscribes to nvblox mesh and occupancy grid outputs to calculate
-# greenhouse coverage metrics. Publishes diagnostics with:
-#   - Total mapped volume (m³)
-#   - Mapped area (m² from 2D ESDF slice)
-#   - Mesh vertex count
-#   - Coverage percentage (if target area is configured)
+# Maintains a 2D occupancy grid (bird's eye view) tracking which areas
+# have been observed by the camera. Uses camera FOV frustum projection
+# onto the ground plane and tracks multi-angle observations.
 #
-# Topic: /coverage/status (diagnostic_msgs/DiagnosticArray)
+# Cell states: UNKNOWN=0, SEEN_ONCE=1, WELL_COVERED=2
+# Multi-angle: cell upgraded when observed from yaw differing by >30°
+#
+# Published:
+#   /coverage/grid    (nav_msgs/OccupancyGrid) at 0.5 Hz
+#   /coverage/status  (agv_greenhouse_msgs/msg/CoverageStatus) at 1 Hz
+# Service:
+#   /coverage/reset   (std_srvs/Trigger)
 # =============================================================================
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from nav_msgs.msg import OccupancyGrid
-from visualization_msgs.msg import Marker
-from std_msgs.msg import String
-import json
+from agv_greenhouse_msgs.msg import CoverageStatus
+from nav_msgs.msg import OccupancyGrid, Odometry
+from std_srvs.srv import Trigger
+from geometry_msgs.msg import Pose
+import numpy as np
+import math
 import time
+
+
+# Cell states
+UNKNOWN = 0
+SEEN_ONCE = 1
+WELL_COVERED = 2
 
 
 class CoverageMonitorNode(Node):
@@ -28,140 +39,153 @@ class CoverageMonitorNode(Node):
         super().__init__('coverage_monitor')
 
         # Parameters
-        self.declare_parameter('target_area_m2', 0.0)  # 0 = no target
-        self.declare_parameter('publish_rate_hz', 0.5)
-        self.declare_parameter('grid_topic', '/nvblox_node/static_occupancy_grid')
-        self.declare_parameter('mesh_topic', '/nvblox_node/tsdf_layer_marker')
+        self.declare_parameter('x_min', -25.0)
+        self.declare_parameter('x_max', 25.0)
+        self.declare_parameter('y_min', -25.0)
+        self.declare_parameter('y_max', 25.0)
+        self.declare_parameter('resolution', 0.1)  # meters per cell
+        self.declare_parameter('camera_hfov_deg', 110.0)  # ZED 2i ~110° HFOV
+        self.declare_parameter('camera_range_m', 5.0)  # Max useful depth
+        self.declare_parameter('multi_angle_threshold_deg', 30.0)
+        self.declare_parameter('grid_publish_rate_hz', 0.5)
+        self.declare_parameter('status_publish_rate_hz', 1.0)
 
-        self.target_area = self.get_parameter('target_area_m2').value
-        rate = self.get_parameter('publish_rate_hz').value
-        grid_topic = self.get_parameter('grid_topic').value
-        mesh_topic = self.get_parameter('mesh_topic').value
+        x_min = self.get_parameter('x_min').value
+        x_max = self.get_parameter('x_max').value
+        y_min = self.get_parameter('y_min').value
+        y_max = self.get_parameter('y_max').value
+        self.resolution = self.get_parameter('resolution').value
+        self.hfov = math.radians(self.get_parameter('camera_hfov_deg').value)
+        self.cam_range = self.get_parameter('camera_range_m').value
+        self.angle_thresh = math.radians(
+            self.get_parameter('multi_angle_threshold_deg').value)
 
-        # State
-        self.mapped_cells = 0
-        self.total_cells = 0
-        self.grid_resolution = 0.0
-        self.grid_width = 0
-        self.grid_height = 0
-        self.mesh_marker_count = 0
-        self.last_grid_time = 0.0
-        self.last_mesh_time = 0.0
-        self.start_time = time.time()
+        # Grid dimensions
+        self.x_min = x_min
+        self.y_min = y_min
+        self.width = int((x_max - x_min) / self.resolution)
+        self.height = int((y_max - y_min) / self.resolution)
 
-        # QoS: nvblox publishes with RELIABLE, so we must match
-        reliable_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
-            depth=1
-        )
+        # Coverage grid (cell states)
+        self.grid = np.zeros((self.height, self.width), dtype=np.uint8)
+        # Yaw at first observation (for multi-angle detection)
+        self.first_yaw = np.full((self.height, self.width), np.nan, dtype=np.float32)
 
         # Subscribers
-        self.grid_sub = self.create_subscription(
-            OccupancyGrid, grid_topic,
-            self.grid_callback, reliable_qos)
-
-        self.mesh_sub = self.create_subscription(
-            Marker, mesh_topic,
-            self.mesh_callback, reliable_qos)
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE, depth=1)
+        self.odom_sub = self.create_subscription(
+            Odometry, '/visual_slam/tracking/odometry',
+            self.odom_callback, sensor_qos)
 
         # Publishers
-        self.diag_pub = self.create_publisher(
-            DiagnosticArray, '/coverage/status', 10)
-        self.json_pub = self.create_publisher(
-            String, '/coverage/json', 10)
+        self.grid_pub = self.create_publisher(OccupancyGrid, '/coverage/grid', 10)
+        self.status_pub = self.create_publisher(CoverageStatus, '/coverage/status', 10)
 
-        # Timer
-        self.timer = self.create_timer(1.0 / rate, self.publish_status)
+        # Services
+        self.reset_srv = self.create_service(
+            Trigger, '/coverage/reset', self.reset_callback)
+
+        # Timers
+        grid_rate = self.get_parameter('grid_publish_rate_hz').value
+        status_rate = self.get_parameter('status_publish_rate_hz').value
+        self.grid_timer = self.create_timer(1.0 / grid_rate, self.publish_grid)
+        self.status_timer = self.create_timer(1.0 / status_rate, self.publish_status)
 
         self.get_logger().info(
-            f'Coverage monitor initialized. Grid: {grid_topic}, Mesh: {mesh_topic}')
+            f'Coverage monitor: {self.width}x{self.height} grid, '
+            f'{self.resolution}m resolution, '
+            f'HFOV={math.degrees(self.hfov):.0f}°, range={self.cam_range}m')
 
-    def grid_callback(self, msg):
-        self.grid_resolution = msg.info.resolution
-        self.grid_width = msg.info.width
-        self.grid_height = msg.info.height
-        self.total_cells = self.grid_width * self.grid_height
+    def _yaw_from_quaternion(self, q):
+        """Extract yaw from quaternion (2D simplification)."""
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        return math.atan2(siny_cosp, cosy_cosp)
 
-        # Count occupied + free cells (non-unknown)
-        # In nvblox ESDF slice: -1 = unknown, 0-100 = known
-        self.mapped_cells = sum(1 for c in msg.data if c >= 0)
-        self.last_grid_time = time.time()
+    def _world_to_grid(self, wx, wy):
+        """Convert world coords to grid indices."""
+        gx = int((wx - self.x_min) / self.resolution)
+        gy = int((wy - self.y_min) / self.resolution)
+        return gx, gy
 
-    def mesh_callback(self, msg):
-        # Single Marker: count points in the mesh
-        self.mesh_marker_count = len(msg.points) if msg.points else 0
-        self.last_mesh_time = time.time()
+    def odom_callback(self, msg):
+        """Project camera FOV onto ground plane and mark visible cells."""
+        px = msg.pose.pose.position.x
+        py = msg.pose.pose.position.y
+        yaw = self._yaw_from_quaternion(msg.pose.pose.orientation)
+
+        # Camera FOV frustum — generate rays from -hfov/2 to +hfov/2
+        half_fov = self.hfov / 2.0
+        n_rays = 32  # Number of rays to sample across FOV
+
+        for i in range(n_rays + 1):
+            angle = yaw - half_fov + (self.hfov * i / n_rays)
+
+            # March along ray at resolution steps
+            for d in np.arange(0.3, self.cam_range, self.resolution):
+                wx = px + d * math.cos(angle)
+                wy = py + d * math.sin(angle)
+
+                gx, gy = self._world_to_grid(wx, wy)
+                if 0 <= gx < self.width and 0 <= gy < self.height:
+                    current = self.grid[gy, gx]
+                    if current == UNKNOWN:
+                        self.grid[gy, gx] = SEEN_ONCE
+                        self.first_yaw[gy, gx] = yaw
+                    elif current == SEEN_ONCE:
+                        # Check multi-angle
+                        first = self.first_yaw[gy, gx]
+                        if not np.isnan(first):
+                            delta = abs(yaw - first)
+                            delta = min(delta, 2 * math.pi - delta)
+                            if delta > self.angle_thresh:
+                                self.grid[gy, gx] = WELL_COVERED
+
+    def reset_callback(self, request, response):
+        self.grid.fill(UNKNOWN)
+        self.first_yaw.fill(np.nan)
+        self.get_logger().info('Coverage grid reset')
+        response.success = True
+        response.message = 'Coverage grid cleared'
+        return response
+
+    def publish_grid(self):
+        msg = OccupancyGrid()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'odom'
+        msg.info.resolution = self.resolution
+        msg.info.width = self.width
+        msg.info.height = self.height
+        msg.info.origin.position.x = self.x_min
+        msg.info.origin.position.y = self.y_min
+
+        # Map cell states to OccupancyGrid values:
+        # UNKNOWN=0 → -1 (unknown in OccupancyGrid)
+        # SEEN_ONCE=1 → 50
+        # WELL_COVERED=2 → 100
+        flat = self.grid.flatten()
+        data = np.where(flat == UNKNOWN, -1,
+               np.where(flat == SEEN_ONCE, 50, 100)).astype(np.int8)
+        msg.data = data.tolist()
+        self.grid_pub.publish(msg)
 
     def publish_status(self):
-        now = time.time()
-        elapsed = now - self.start_time
+        total = self.width * self.height
+        seen = int(np.sum(self.grid >= SEEN_ONCE))
+        well = int(np.sum(self.grid >= WELL_COVERED))
 
-        # Calculate metrics
-        mapped_area = self.mapped_cells * (self.grid_resolution ** 2) if self.grid_resolution > 0 else 0.0
-        total_area = self.total_cells * (self.grid_resolution ** 2) if self.grid_resolution > 0 else 0.0
-
-        coverage_pct = 0.0
-        if self.target_area > 0:
-            coverage_pct = min(100.0, (mapped_area / self.target_area) * 100.0)
-        elif total_area > 0:
-            coverage_pct = (self.mapped_cells / self.total_cells) * 100.0
-
-        grid_age = now - self.last_grid_time if self.last_grid_time > 0 else -1.0
-        mesh_age = now - self.last_mesh_time if self.last_mesh_time > 0 else -1.0
-
-        # Determine health
-        level = DiagnosticStatus.OK
-        message = 'Mapping active'
-        if grid_age < 0 and mesh_age < 0:
-            level = DiagnosticStatus.WARN
-            message = 'No nvblox data received yet'
-        elif grid_age > 10.0 or mesh_age > 10.0:
-            level = DiagnosticStatus.WARN
-            message = 'nvblox data stale'
-
-        # Diagnostic message
-        diag = DiagnosticArray()
-        diag.header.stamp = self.get_clock().now().to_msg()
-        status = DiagnosticStatus()
-        status.name = 'Coverage'
-        status.level = level
-        status.message = message
-        status.values = [
-            KeyValue(key='Mapped Area (m²)', value=f'{mapped_area:.2f}'),
-            KeyValue(key='Grid Coverage (%)', value=f'{coverage_pct:.1f}'),
-            KeyValue(key='Grid Resolution (m)', value=f'{self.grid_resolution:.3f}'),
-            KeyValue(key='Grid Cells (mapped/total)',
-                     value=f'{self.mapped_cells}/{self.total_cells}'),
-            KeyValue(key='Mesh Markers', value=str(self.mesh_marker_count)),
-            KeyValue(key='Elapsed (s)', value=f'{elapsed:.0f}'),
-        ]
-        if self.target_area > 0:
-            status.values.append(
-                KeyValue(key='Target Area (m²)', value=f'{self.target_area:.1f}'))
-            status.values.append(
-                KeyValue(key='Target Coverage (%)', value=f'{coverage_pct:.1f}'))
-
-        diag.status = [status]
-        self.diag_pub.publish(diag)
-
-        # JSON for easy parsing
-        json_msg = String()
-        json_msg.data = json.dumps({
-            'mapped_area_m2': round(mapped_area, 2),
-            'coverage_pct': round(coverage_pct, 1),
-            'mesh_markers': self.mesh_marker_count,
-            'grid_resolution': self.grid_resolution,
-            'elapsed_s': round(elapsed, 0),
-            'healthy': level == DiagnosticStatus.OK,
-        })
-        self.json_pub.publish(json_msg)
-
-        if int(elapsed) % 30 == 0:
-            self.get_logger().info(
-                f'Coverage: {mapped_area:.1f}m² mapped, '
-                f'{coverage_pct:.1f}% coverage, '
-                f'{self.mesh_marker_count} mesh markers')
+        msg = CoverageStatus()
+        msg.stamp = self.get_clock().now().to_msg()
+        msg.total_cells = total
+        msg.seen_cells = seen
+        msg.well_covered_cells = well
+        msg.coverage_percent = (seen / total * 100.0) if total > 0 else 0.0
+        msg.well_covered_percent = (well / total * 100.0) if total > 0 else 0.0
+        msg.mapped_area_m2 = seen * (self.resolution ** 2)
+        msg.grid_resolution = self.resolution
+        self.status_pub.publish(msg)
 
 
 def main(args=None):

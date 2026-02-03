@@ -1,0 +1,57 @@
+# =============================================================================
+# Recording Configuration — Session Data Capture Settings
+# =============================================================================
+# Defines what gets recorded during a capture session and how.
+# Used by session_recorder node.
+# =============================================================================
+
+/**:
+  ros__parameters:
+    # -- Output settings --
+    output_base_dir: "/mnt/ssd/sessions"
+
+    # -- SVO2 recording (via ZED SDK service) --
+    svo2:
+      enabled: true
+      compression: "lossless"  # "lossless", "lossy", "h264", "h265"
+      # SVO2 captures raw stereo + IMU at full resolution
+
+    # -- ROS2 bag recording --
+    bag:
+      enabled: true
+      topics:
+        # Stereo grayscale (for 3DGS reconstruction)
+        - "/zed/zed_node/left/image_rect_gray"
+        - "/zed/zed_node/right/image_rect_gray"
+        - "/zed/zed_node/left/camera_info"
+        - "/zed/zed_node/right/camera_info"
+        # Color (for textured reconstruction)
+        - "/zed/zed_node/rgb/color/rect/image"
+        - "/zed/zed_node/rgb/camera_info"
+        # Depth
+        - "/zed/zed_node/depth/depth_registered"
+        - "/zed/zed_node/depth/camera_info"
+        # Filtered depth
+        - "/filtered/depth"
+        - "/filtered/rgb"
+        - "/filtered/camera_info"
+        # IMU
+        - "/zed/zed_node/imu/data"
+        # Odometry
+        - "/visual_slam/tracking/odometry"
+        - "/visual_slam/tracking/slam_path"
+        # TF
+        - "/tf"
+        - "/tf_static"
+
+    # -- TUM trajectory --
+    tum:
+      enabled: true
+      odom_topic: "/visual_slam/tracking/odometry"
+
+    # -- nvblox PLY save on stop --
+    save_ply_on_stop: true
+
+    # -- Disk space monitoring --
+    disk_warning_threshold_gb: 5.0
+    disk_check_interval_sec: 10.0

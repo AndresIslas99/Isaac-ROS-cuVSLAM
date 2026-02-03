@@ -1,0 +1,134 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Arrows: false
+      Show Axes: true
+      Show Names: true
+      Tree:
+        odom:
+          base_link:
+            zed_camera_link: {}
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+        base_link:
+          Value: true
+        odom:
+          Value: true
+        zed_camera_link:
+          Value: true
+      Update Interval: 0
+
+    - Class: rviz_default_plugins/Map
+      Name: Coverage Grid
+      Enabled: true
+      Topic:
+        Value: /coverage/grid
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+      Alpha: 0.7
+      Color Scheme: costmap
+      Draw Behind: true
+
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Nvblox Mesh
+      Enabled: true
+      Topic:
+        Value: /nvblox_node/mesh
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+
+    - Class: rviz_default_plugins/Path
+      Name: Robot Path
+      Enabled: true
+      Topic:
+        Value: /visual_slam/tracking/slam_path
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+      Color: 0; 255; 0
+      Line Style:
+        Line Width: 0.03
+
+    - Class: rviz_default_plugins/Odometry
+      Name: Current Pose
+      Enabled: true
+      Topic:
+        Value: /visual_slam/tracking/odometry
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+      Keep: 1
+      Shape:
+        Alpha: 1
+        Axes Length: 0.3
+        Axes Radius: 0.03
+
+    - Class: rviz_default_plugins/Image
+      Name: Camera Feed
+      Enabled: true
+      Topic:
+        Value: /filtered/rgb
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+      Max Value: 1
+      Min Value: 0
+
+    - Class: rviz_default_plugins/Image
+      Name: Depth View
+      Enabled: true
+      Topic:
+        Value: /filtered/depth
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Nvblox ESDF
+      Enabled: false
+      Topic:
+        Value: /nvblox_node/static_esdf_pointcloud
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+      Size (m): 0.05
+      Color Transformer: FlatColor
+      Color: 100; 100; 255
+
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: odom
+    Frame Rate: 30
+
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/FocusCamera
+
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Top Down
+      Target Frame: base_link
+      Scale: 30
+      X: 0
+      Y: 0
+      Angle: 0
+
+  Window Geometry:
+    Width: 1920
+    Height: 1080
+    Displays:
+      collapsed: false
+    Views:
+      collapsed: true

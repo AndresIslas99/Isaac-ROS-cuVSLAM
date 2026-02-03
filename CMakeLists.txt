@@ -18,6 +18,7 @@ find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(agv_greenhouse_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 
 # ── Optional: CUDA for GPU depth filter ──
@@ -200,6 +201,7 @@ install(DIRECTORY
   rviz
   scripts
   urdf
+  docs
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -209,6 +211,8 @@ install(PROGRAMS
   scripts/validate_slam.sh
   scripts/coverage_monitor.py
   scripts/session_recorder.py
+  scripts/check_storage.py
+  scripts/export_session.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

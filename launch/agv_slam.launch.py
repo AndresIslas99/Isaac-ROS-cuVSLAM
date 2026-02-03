@@ -51,6 +51,20 @@ def generate_launch_description():
         'use_sim_time', default_value='false',
         description='Use simulation time')
 
+    # Camera mount TF arguments (see docs/CALIBRATION.md)
+    declare_cam_x = DeclareLaunchArgument(
+        'camera_x', default_value='0.1',
+        description='Camera X offset from base_link (forward, meters)')
+    declare_cam_y = DeclareLaunchArgument(
+        'camera_y', default_value='0.0',
+        description='Camera Y offset from base_link (left, meters)')
+    declare_cam_z = DeclareLaunchArgument(
+        'camera_z', default_value='0.3',
+        description='Camera Z offset from base_link (up, meters)')
+    declare_cam_pitch = DeclareLaunchArgument(
+        'camera_pitch', default_value='0.087',
+        description='Camera downward pitch in radians (0.087 ≈ 5°)')
+
     # ── Environment ──
     set_dds = SetEnvironmentVariable(
         'RMW_IMPLEMENTATION', 'rmw_cyclonedds_cpp')
@@ -347,11 +361,11 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='base_to_camera_tf',
         arguments=[
-            '--x', '0.1',
-            '--y', '0.0',
-            '--z', '0.3',
+            '--x', LaunchConfiguration('camera_x'),
+            '--y', LaunchConfiguration('camera_y'),
+            '--z', LaunchConfiguration('camera_z'),
             '--roll', '0.0',
-            '--pitch', '0.087',
+            '--pitch', LaunchConfiguration('camera_pitch'),
             '--yaw', '0.0',
             '--frame-id', 'base_link',
             '--child-frame-id', 'zed_camera_link',
@@ -364,6 +378,10 @@ def generate_launch_description():
         declare_rviz,
         declare_foxglove,
         declare_sim_time,
+        declare_cam_x,
+        declare_cam_y,
+        declare_cam_z,
+        declare_cam_pitch,
 
         # Environment
         set_dds,

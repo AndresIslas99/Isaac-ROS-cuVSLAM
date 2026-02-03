@@ -1,95 +1,81 @@
 # =============================================================================
-# ZED 2i Configuration — Optimized for Industrial SLAM on Jetson Orin AGX
+# ZED 2i Camera Configuration — Dual-Purpose (Preview + Recording)
 # =============================================================================
-# This config maximizes depth quality while maintaining 30 FPS throughput.
-# Key: NEURAL depth mode + HD720 + aggressive confidence filtering.
+# HD1080 + NEURAL depth for maximum quality during recording.
+# cuVSLAM handles positional tracking; ZED's internal VO runs for
+# IMU fusion and rolling shutter correction only.
 # =============================================================================
 
 /**:
   ros__parameters:
-
-    # ── General ──
     general:
-      camera_model:                'zed2i'
-      serial_number:               0              # 0 = auto-detect
-      gpu_id:                      0
-      grab_resolution:             'HD720'        # 1280x720: best compute/quality ratio
-      grab_frame_rate:             30             # Must match cuVSLAM expectation
-      pub_frame_rate:              30.0           # Publish at full grab rate for cuVSLAM
-      pub_resolution:              'NATIVE'       # No downscaling — full HD720 to cuVSLAM
-      svo_compression:             'H265'         # For recording bags later
-      self_calib:                  true
-      camera_flip:                 false
+      camera_model: 'zed2i'
+      camera_name: 'zed'
+      grab_resolution: 'HD1080'   # 1920x1080 — highest for recording
+      grab_frame_rate: 30
+      pub_resolution: 'NATIVE'
+      gpu_id: 0
 
-    # ── Depth Sensing — THE CRITICAL SECTION ──
-    depth:
-      depth_mode:                  'PERFORMANCE'  # 60fps capable, lighter GPU load
-                                                   # Frees GPU headroom for cuVSLAM + GUI
-                                                   # Adequate quality for indoor 0.3-10m range
-                                                   # NEURAL: 34fps, best quality (use if needed)
-                                                   # NEURAL_PLUS: 10fps, not worth it
-      depth_stabilization:         50              # 1-100. Higher = smoother (temporal)
-                                                   # 50 is good balance for moving robot
-      depth_confidence:            50              # 0-100. LOWER = stricter filtering
-                                                   # 50 removes edge artifacts aggressively
-                                                   # Default 100 lets everything through!
-      depth_texture_conf:          100             # 0-100. HIGHER = stricter
-                                                   # 100 removes flat uniform surfaces
-                                                   # Critical for greenhouse walls/floors
-      depth_minimum_distance:      0.3             # 30cm minimum (ZED 2i physical limit)
-      depth_maximum_distance:      10.0            # 10m covers greenhouse range
-      remove_saturated_areas:      true            # Essential for glass/reflections
-
-    # ── Video Settings ──
     video:
-      brightness:                  4               # Default
-      contrast:                    4
-      hue:                         0
-      saturation:                  4
-      sharpness:                   4
-      gamma:                       8
-      auto_exposure_gain:          true
-      exposure:                    80
-      gain:                        80
-      auto_whitebalance:           true
-      whitebalance_temperature:    42              # x100 → 4200K (range [28,65])
-      publish_gray:                true            # Required for cuVSLAM stereo input
-      publish_left_right:          true            # Left/right grayscale for cuVSLAM
+      brightness: 4
+      contrast: 4
+      hue: 0
+      saturation: 4
+      sharpness: 4
+      gamma: 8
+      auto_exposure_gain: true
+      exposure: 100
+      gain: 100
+      auto_whitebalance: true
+      publish_gray: true           # Required for cuVSLAM stereo input
+      publish_left_right: true     # Publish left + right for stereo
+      publish_raw: false
 
-    # ── Positional Tracking (ZED SDK VIO) ──
-    # NOTE: We use cuVSLAM for odometry, but ZED's internal VIO still runs
-    # to provide IMU-compensated depth (rolling shutter correction).
-    # We disable ZED's pose publishing to avoid TF conflicts with cuVSLAM.
+    depth:
+      depth_mode: 'PERFORMANCE'         # Best quality for recording (34fps on Orin)
+      depth_stabilization: 50
+      min_depth: 0.3
+      max_depth: 10.0
+      openni_depth_mode: false
+      point_cloud_freq: 15.0       # Reduce PC rate to save GPU for nvblox
+      confidence_threshold: 50     # Balance noise vs coverage
+      texture_confidence_threshold: 100  # Strictest texture confidence
+
     pos_tracking:
-      pos_tracking_enabled:        true            # Needed for IMU fusion internally
-      publish_tf:                  false           # cuVSLAM handles TF
-      publish_map_tf:              false           # RTAB-Map handles map→odom
-      area_memory:                 false           # Disable ZED's loop closure
-      imu_fusion:                  true            # CRITICAL: rolling shutter compensation
-      two_d_mode:                  true            # Ground robot constraint
-      set_gravity_as_origin:       true            # Align with gravity on startup
-      depth_min_range:             0.3
-      set_floor_as_origin:         false
-      initial_base_pose:           [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      pos_tracking_enabled: true   # Needed for IMU fusion / rolling shutter
+      publish_tf: false            # cuVSLAM handles odom->base_link TF
+      publish_map_tf: false        # No ZED map->odom
+      area_memory: false           # No ZED loop closure
+      two_d_mode: true             # Ground robot
+      set_gravity_as_origin: true
 
-    # ── Sensors (IMU) ──
     sensors:
-      sensors_image_sync:          true
-      publish_imu_tf:              true            # cuVSLAM needs zed_imu_link frame
-      sensors_timestamp_sync:      false
+      publish_imu_tf: true
+      sensors_image_sync: false
+      sensors_pub_rate: 400.0      # Full IMU rate for cuVSLAM
 
-    # ── Topics (what ZED publishes) ──
-    # These are the default topic names. Our launch file remaps them.
-    # ZED publishes:
-    #   /zed/zed_node/rgb/image_rect_color         → RGB for RTAB-Map
-    #   /zed/zed_node/depth/depth_registered        → Depth for filter node
-    #   /zed/zed_node/left/image_rect_gray          → Left for cuVSLAM
-    #   /zed/zed_node/right/image_rect_gray         → Right for cuVSLAM
-    #   /zed/zed_node/imu/data                      → IMU for cuVSLAM
-    #   /zed/zed_node/rgb/camera_info               → Intrinsics
+    svo_compression: 'H265'        # SVO recording compression
 
-    # ── QoS ──
-    qos:
-      reliability:                 'RELIABLE'
-      durability:                  'VOLATILE'
-      depth:                       10
+    streaming:
+      stream_enabled: false
+
+    object_detection:
+      od_enabled: false
+
+    body_tracking:
+      bt_enabled: false
+
+    # QoS
+    qos_overrides:
+      depth:
+        reliability: 'RELIABLE'
+        durability: 'VOLATILE'
+        depth: 10
+      image:
+        reliability: 'RELIABLE'
+        durability: 'VOLATILE'
+        depth: 10
+      imu:
+        reliability: 'BEST_EFFORT'
+        durability: 'VOLATILE'
+        depth: 100
