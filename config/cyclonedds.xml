@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CycloneDDS Configuration for AGV SLAM Pipeline
+  
+  Why CycloneDDS over FastDDS:
+  - Better handling of large messages (images, point clouds)
+  - Lower latency for intra-process communication
+  - Shared memory transport on Jetson
+  - More predictable QoS behavior
+  
+  Set in environment:
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    export CYCLONEDDS_URI=file:///path/to/this/cyclonedds.xml
+-->
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain id="any">
+    <General>
+      <!-- Localhost only: all nodes on same Jetson -->
+      <Interfaces>
+        <NetworkInterface name="lo" />
+      </Interfaces>
+      <AllowMulticast>default</AllowMulticast>
+    </General>
+
+    <Internal>
+      <!-- Large receive buffers for image/depth/pointcloud data -->
+      <SocketReceiveBufferSize min="10MB" />
+      <Watermarks>
+        <WhcHigh>500kB</WhcHigh>
+      </Watermarks>
+      <!-- Reduce discovery overhead -->
+      <LeaseDuration>30s</LeaseDuration>
+    </Internal>
+
+    <!-- Shared memory transport: zero-copy between nodes -->
+    <SharedMemory>
+      <Enable>true</Enable>
+      <LogLevel>info</LogLevel>
+    </SharedMemory>
+
+    <Tracing>
+      <OutputFile>/tmp/cyclonedds.log</OutputFile>
+      <Verbosity>warning</Verbosity>
+    </Tracing>
+  </Domain>
+</CycloneDDS>

@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<!--
+  ZED 2i Camera Mount URDF
+  
+  Defines the TF relationship between base_link and the camera.
+  Adjust the xyz/rpy values to match your physical robot geometry.
+  
+  The static_transform_publisher in the launch file overrides this,
+  but this URDF is useful for rviz visualization and documentation.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="agv_camera_mount">
+  
+  <!-- Base link (robot center, ground level) -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.5 0.4 0.15"/>
+      </geometry>
+      <material name="dark_grey">
+        <color rgba="0.3 0.3 0.3 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- Camera mount point -->
+  <!-- Adjust these values for your AGV: -->
+  <!--   x: forward from base center -->
+  <!--   y: left from base center (0 = centered) -->
+  <!--   z: height above ground -->
+  <!--   pitch: downward tilt in radians (positive = look down) -->
+  <joint name="base_to_camera_mount" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_mount_link"/>
+    <origin xyz="0.1 0.0 0.3" rpy="0.0 0.087 0.0"/>
+  </joint>
+
+  <link name="camera_mount_link"/>
+
+  <!-- ZED 2i camera (from zed_ros2_wrapper URDF) -->
+  <!-- The zed_wrapper publishes its own internal TF tree from zed2i_base_link -->
+  <joint name="camera_mount_to_zed" type="fixed">
+    <parent link="camera_mount_link"/>
+    <child link="zed2i_base_link"/>
+    <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
+  </joint>
+
+  <link name="zed2i_base_link"/>
+
+</robot>

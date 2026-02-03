@@ -1,0 +1,62 @@
+# =============================================================================
+# Isaac ROS cuVSLAM Configuration — GPU-Accelerated Visual-Inertial Odometry
+# =============================================================================
+# cuVSLAM processes stereo frames at ~1.8ms on Orin AGX.
+# It provides the odometry source for RTAB-Map (which handles mapping only).
+#
+# cuVSLAM outputs:
+#   /visual_slam/tracking/odometry    → nav_msgs/Odometry (for RTAB-Map)
+#   /visual_slam/tracking/slam_path   → nav_msgs/Path
+#   TF: odom → base_link
+#
+# cuVSLAM does NOT do:
+#   - Dense mapping (RTAB-Map does this)
+#   - Loop closure with persistent map (RTAB-Map does this)
+#   - Wheel odometry fusion (add EKF later if needed)
+# =============================================================================
+
+/**:
+  ros__parameters:
+
+    # ── Input Configuration ──
+    # cuVSLAM expects rectified grayscale stereo + IMU
+    enable_image_denoising:          false         # ZED already handles this
+    rectified_images:                true          # ZED provides rectified images
+    enable_imu_fusion:               true          # Fuse ZED 2i's BMI085 IMU
+    gyro_noise_density:              0.000244      # BMI085 spec: 0.014 °/s/√Hz
+    gyro_random_walk:                0.000019393   # BMI085 typical
+    accel_noise_density:             0.001862      # BMI085 spec: 120 μg/√Hz
+    accel_random_walk:               0.003          # BMI085 typical
+    calibration_frequency:           200.0         # IMU rate / 2
+    img_jitter_threshold_ms:         34.0          # ~1 frame at 30fps
+
+    # ── Tracking Parameters ──
+    enable_slam_visualization:       false         # Save GPU for RTAB-Map
+    enable_observations:             true
+    enable_landmarks:                false         # Landmark loop closure off
+                                                    # (RTAB-Map handles loop closure)
+    enable_localization_n_mapping:   false         # Odometry only mode
+                                                    # true = cuVSLAM does its own SLAM
+                                                    # false = pure VIO (faster, what we want)
+    enable_ground_constraint_in_odometry: true     # Ground robot: constrain to 2D plane
+    enable_verbosity:                false
+
+    # ── Performance ──
+    # On Orin AGX MAXN, cuVSLAM uses ~1.7% GPU, ~5% CPU
+    # These settings prioritize reliability over absolute speed
+    num_cameras:                     2             # Stereo pair
+    image_buffer_size:               100
+    imu_buffer_size:                 200
+
+    # ── Frame IDs ──
+    # Must match your URDF/TF tree
+    map_frame:                       'map'
+    odom_frame:                      'odom'
+    base_frame:                      'base_link'
+    # Camera frames are set via launch file remapping
+
+    # ── Output ──
+    publish_odom_to_base_tf:         true          # Publishes odom → base_link
+    publish_map_to_odom_tf:          false         # RTAB-Map publishes map → odom
+    invert_odom_to_base_tf:          false
+    override_publishing_stamp:       false

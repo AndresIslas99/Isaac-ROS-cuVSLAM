@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>agv_slam</name>
+  <version>1.0.0</version>
+  <description>
+    Industrial-grade SLAM pipeline for greenhouse AGV inspection.
+    ZED 2i + cuVSLAM (odometry) + RTAB-Map (mapping/loop closure).
+  </description>
+  <maintainer email="andres@agv.local">Andres</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- Core -->
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>image_transport</depend>
+  <depend>cv_bridge</depend>
+  <depend>message_filters</depend>
+
+  <!-- Sensor -->
+  <exec_depend>zed_wrapper</exec_depend>
+  <exec_depend>zed_ros2</exec_depend>
+
+  <!-- SLAM -->
+  <exec_depend>isaac_ros_visual_slam</exec_depend>
+  <exec_depend>rtabmap_ros</exec_depend>
+  <exec_depend>rtabmap_slam</exec_depend>
+  <exec_depend>rtabmap_viz</exec_depend>
+
+  <!-- DDS -->
+  <exec_depend>rmw_cyclonedds_cpp</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,172 @@
+# =============================================================================
+# RTAB-Map Configuration — Mapper + Loop Closure Only (No Visual Odometry)
+# =============================================================================
+# In this architecture, RTAB-Map does NOT compute odometry. cuVSLAM provides
+# odom at 30Hz/1.8ms. RTAB-Map focuses exclusively on:
+#   1. Building the pose graph (map nodes)
+#   2. Detecting loop closures
+#   3. Graph optimization (GTSAM)
+#   4. Publishing corrected map → odom TF
+#   5. Generating occupancy grid for navigation
+#
+# Target: ±5cm consistent accuracy in greenhouse environments
+# =============================================================================
+
+/**:
+  ros__parameters:
+
+    # ── Core RTAB-Map Settings ──
+    subscribe_depth:              true
+    subscribe_rgb:                true
+    subscribe_odom:               true             # From cuVSLAM
+    subscribe_odom_info:          false
+    approx_sync:                  true
+    approx_sync_max_interval:     0.05             # 50ms tolerance
+    queue_size:                   10
+    qos_image:                    2                # SensorDataQoS
+    qos_camera_info:              2
+    qos_odom:                     2
+
+    # Frame configuration
+    frame_id:                     'base_link'
+    odom_frame_id:                'odom'
+    map_frame_id:                 'map'
+    publish_tf:                   true             # map → odom correction
+
+    # ── CRITICAL: Disable internal visual odometry ──
+    odom_sensor_sync:             false
+    visual_odometry:              false            # cuVSLAM handles this
+    imu_topic:                    '/zed/zed_node/imu/data'
+    wait_imu_to_init:             true             # Align gravity before mapping
+
+    # ── Detection Rate ──
+    # How fast RTAB-Map processes frames for mapping
+    Rtabmap/DetectionRate:        '5.0'            # 5 Hz mapping (plenty for AGV speed)
+    Rtabmap/ImageBufferSize:      '1'              # Only process latest frame
+    Rtabmap/CreateIntermediateNodes: 'true'         # Fill gaps between detections
+
+    # ══════════════════════════════════════════════
+    # MAP NODE CREATION — FIX FOR "1 MAP NODE" BUG
+    # ══════════════════════════════════════════════
+    # Your main issue: default 0.1m threshold means robot must move 10cm
+    # before creating a new node. With slow greenhouse movement, nodes
+    # never get created → no graph → no loop closure → no map.
+    RGBD/LinearUpdate:            '0.05'           # New node every 5cm movement
+    RGBD/AngularUpdate:           '0.1'            # New node every ~6° rotation
+    RGBD/LinearSpeedUpdate:       '0.0'            # Disabled (use distance)
+    RGBD/AngularSpeedUpdate:      '0.0'
+
+    # ══════════════════════════════════════════════
+    # LOOP CLOSURE DETECTION — YOUR SECOND MAIN FIX
+    # ══════════════════════════════════════════════
+    Rtabmap/LoopThr:              '0.09'           # Lower = more loop closures detected
+                                                    # Default 0.11 is too strict for greenhouses
+    Rtabmap/LoopRatio:            '0.0'            # Disabled: accept all matches above threshold
+
+    # Proximity-based loop closure (essential for row-based navigation)
+    RGBD/ProximityBySpace:        'true'           # CRITICAL: enables spatial proximity detection
+    RGBD/ProximityByTime:         'false'
+    RGBD/ProximityMaxGraphDepth:  '50'             # Search up to 50 nodes back
+    RGBD/ProximityPathMaxNeighbors: '10'
+    RGBD/ProximityMaxPaths:       '3'
+    RGBD/LocalRadius:             '5.0'            # 5m radius for local loop closure
+    RGBD/OptimizeFromGraphEnd:    'false'
+
+    # Re-extract features on loop closure for better matching
+    RGBD/LoopClosureReextractFeatures: 'true'
+
+    # ══════════════════════════════════════════════
+    # FEATURE DETECTION — GFTT + ORB (Best for Greenhouse)
+    # ══════════════════════════════════════════════
+    # GFTT distributes features uniformly across the image,
+    # preventing clustering in high-texture plant areas while
+    # maintaining coverage on walls/floors. ORB descriptor is
+    # rotation-invariant and fast on ARM.
+
+    # Visual features for loop closure
+    Vis/FeatureType:              '8'              # 8 = GFTT/ORB
+    Vis/MaxFeatures:              '1000'           # Enough for indoor
+    Vis/MinInliers:               '15'             # Reduced for repetitive textures
+    Vis/InlierDistance:            '0.05'           # 5cm inlier tolerance
+    Vis/MaxDepth:                 '8.0'            # Trust depth up to 8m
+    Vis/MinDepth:                 '0.3'
+    Vis/CorType:                  '0'              # 0=Features Matching
+    Vis/EpipolarConstraintVariance: '0.1'
+
+    # Keypoint vocabulary for bag-of-words matching
+    Kp/DetectorStrategy:          '8'              # Must match Vis/FeatureType
+    Kp/MaxFeatures:               '600'
+    Kp/MaxDepth:                  '8.0'
+    Kp/MinDepth:                  '0.3'
+    Kp/NNStrategy:                '3'              # BruteForce for binary descriptors
+    Kp/NndrRatio:                 '0.8'            # NNDR matching ratio
+
+    # ══════════════════════════════════════════════
+    # GRAPH OPTIMIZATION — GTSAM (Gravity-Aware)
+    # ══════════════════════════════════════════════
+    Optimizer/Strategy:           '2'              # 2 = GTSAM (supports gravity)
+                                                    # 0 = TORO (no gravity)
+                                                    # 1 = g2o (limited gravity)
+    Optimizer/GravitySigma:       '0.3'            # IMU gravity alignment weight
+    Optimizer/Iterations:         '100'            # Thorough optimization
+    Optimizer/Robust:             'true'           # Huber robust cost function
+    Optimizer/VarianceIgnored:    'false'
+    RGBD/OptimizeMaxError:        '3.0'            # Reject loop closures with >3m error
+
+    # ══════════════════════════════════════════════
+    # GROUND ROBOT CONSTRAINTS
+    # ══════════════════════════════════════════════
+    Reg/Force3DoF:                'true'           # Constrain to X, Y, Yaw only
+    Reg/Strategy:                 '0'              # 0=Visual (no ICP needed)
+
+    # ══════════════════════════════════════════════
+    # MEMORY MANAGEMENT — Exploit 64GB RAM
+    # ══════════════════════════════════════════════
+    Mem/STMSize:                  '10'             # Short-term memory nodes
+    Mem/RehearsalSimilarity:      '0.6'            # Higher for repetitive scenes
+    Mem/NotLinkedNodesKept:       'false'           # Clean up disconnected nodes
+    Mem/ImagePreDecimation:       '1'              # Full resolution images
+    Mem/ImagePostDecimation:      '1'
+    Mem/LaserScanDownsampleStepSize: '1'
+    Mem/IncrementalMemory:        'true'
+    Mem/InitWMWithAllNodes:       'true'            # Keep all nodes in working memory
+    Rtabmap/MemoryThr:            '0'              # 0 = unlimited memory (use 64GB!)
+    Rtabmap/StartNewMapOnLoopClosure: 'false'
+
+    # ══════════════════════════════════════════════
+    # OCCUPANCY GRID FOR NAVIGATION
+    # ══════════════════════════════════════════════
+    Grid/DepthDecimation:         '4'              # Downsample depth 4x for grid
+    Grid/RangeMax:                '8.0'
+    Grid/RangeMin:                '0.3'
+    Grid/CellSize:                '0.05'           # 5cm cells (matches ±5cm target)
+    Grid/RayTracing:              'false'          # Save CPU
+    Grid/3D:                      'false'          # 2D grid for nav2
+    Grid/MaxGroundHeight:         '0.15'           # 15cm = ground plane
+    Grid/MaxObstacleHeight:       '2.0'            # 2m max obstacle
+    Grid/NormalsSegmentation:     'true'
+    Grid/NoiseFilteringRadius:    '0.05'
+    Grid/NoiseFilteringMinNeighbors: '5'
+    Grid/FootprintWidth:          '0.0'            # Set to robot width if known
+    Grid/FootprintLength:         '0.0'            # Set to robot length if known
+    Grid/FootprintHeight:         '0.0'
+
+    # ══════════════════════════════════════════════
+    # POINT CLOUD OUTPUT (for 3D inspection map)
+    # ══════════════════════════════════════════════
+    cloud_decimation:             4
+    cloud_max_depth:              8.0
+    cloud_min_depth:              0.3
+    cloud_voxel_size:             0.02             # 2cm voxel: good detail for inspection
+    cloud_floor_culling_height:   0.0
+    cloud_ceiling_culling_height: 0.0
+    cloud_noise_filtering_radius: 0.05
+    cloud_noise_filtering_min_neighbors: 5
+
+    # ══════════════════════════════════════════════
+    # DATABASE
+    # ══════════════════════════════════════════════
+    database_path:                '/home/orza/slam_maps/greenhouse.db'
+    Db/Sqlite3CacheSize:          '10000'          # Larger SQLite cache
+    Db/Sqlite3JournalMode:        '3'              # WAL mode for performance
+    Mem/LocalizationDataSaved:    'true'            # Save data for re-localization

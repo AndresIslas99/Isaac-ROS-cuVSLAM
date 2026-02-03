@@ -1,0 +1,36 @@
+# =============================================================================
+# Depth Filter Configuration — Pre-processes ZED depth before RTAB-Map
+# =============================================================================
+# Stages:
+#   1. PassThrough: remove out-of-range + NaN pixels
+#   2. Temporal: average N frames to reduce flicker noise
+#   3. Bilateral: edge-preserving smoothing
+#   4. Hole filling: morphological closing + inpainting
+# =============================================================================
+
+/**:
+  ros__parameters:
+    # ── Range filter ──
+    min_depth:                   0.3              # Meters (ZED 2i min)
+    max_depth:                   10.0             # Meters (greenhouse max)
+
+    # ── Temporal averaging ──
+    enable_temporal:             true
+    temporal_window:             3                # Average 3 frames (~100ms at 30fps)
+                                                  # Higher = smoother but more lag
+
+    # ── Bilateral filter ──
+    enable_bilateral:            true
+    bilateral_d:                 5                # Kernel diameter (keep small for speed)
+    bilateral_sigma_color:       50.0             # Color similarity (depth domain)
+    bilateral_sigma_space:       50.0             # Spatial proximity
+
+    # ── Hole filling ──
+    enable_hole_filling:         false            # Enable if you see many small holes
+    hole_kernel_size:            3                # Morphological kernel (pixels)
+
+    # ── Topics ──
+    input_depth_topic:           '/zed/zed_node/depth/depth_registered'
+    input_rgb_topic:             '/zed/zed_node/rgb/image_rect_color'
+    output_depth_topic:          '/filtered/depth'
+    output_rgb_topic:            '/filtered/rgb'

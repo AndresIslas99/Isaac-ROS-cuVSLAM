@@ -1,0 +1,90 @@
+# =============================================================================
+# ZED 2i Configuration — Optimized for Industrial SLAM on Jetson Orin AGX
+# =============================================================================
+# This config maximizes depth quality while maintaining 30 FPS throughput.
+# Key: NEURAL depth mode + HD720 + aggressive confidence filtering.
+# =============================================================================
+
+/**:
+  ros__parameters:
+
+    # ── General ──
+    general:
+      camera_model:                'zed2i'
+      serial_number:               0              # 0 = auto-detect
+      gpu_id:                      0
+      grab_resolution:             'HD720'        # 1280x720: best compute/quality ratio
+      grab_frame_rate:             30             # Must match cuVSLAM expectation
+      svo_compression:             'H265'         # For recording bags later
+      self_calib:                  true
+      camera_flip:                 false
+
+    # ── Depth Sensing — THE CRITICAL SECTION ──
+    depth:
+      depth_mode:                  'NEURAL'       # Best accuracy/speed on Orin AGX
+                                                   # NEURAL: 34fps, <1% error at 4m
+                                                   # NEURAL_PLUS: 10fps, not worth it
+                                                   # ULTRA: 15fps, worse accuracy
+      depth_stabilization:         50              # 1-100. Higher = smoother (temporal)
+                                                   # 50 is good balance for moving robot
+      depth_confidence:            50              # 0-100. LOWER = stricter filtering
+                                                   # 50 removes edge artifacts aggressively
+                                                   # Default 100 lets everything through!
+      depth_texture_conf:          100             # 0-100. HIGHER = stricter
+                                                   # 100 removes flat uniform surfaces
+                                                   # Critical for greenhouse walls/floors
+      depth_minimum_distance:      0.3             # 30cm minimum (ZED 2i physical limit)
+      depth_maximum_distance:      10.0            # 10m covers greenhouse range
+      remove_saturated_areas:      true            # Essential for glass/reflections
+
+    # ── Video Settings ──
+    video:
+      brightness:                  4               # Default
+      contrast:                    4
+      hue:                         0
+      saturation:                  4
+      sharpness:                   4
+      gamma:                       8
+      auto_exposure_gain:          true
+      exposure:                    100
+      gain:                        100
+      auto_whitebalance:           true
+      whitebalance_temperature:    4200
+
+    # ── Positional Tracking (ZED SDK VIO) ──
+    # NOTE: We use cuVSLAM for odometry, but ZED's internal VIO still runs
+    # to provide IMU-compensated depth (rolling shutter correction).
+    # We disable ZED's pose publishing to avoid TF conflicts with cuVSLAM.
+    pos_tracking:
+      pos_tracking_enabled:        true            # Needed for IMU fusion internally
+      publish_tf:                  false           # cuVSLAM handles TF
+      publish_map_tf:              false           # RTAB-Map handles map→odom
+      area_memory:                 false           # Disable ZED's loop closure
+      imu_fusion:                  true            # CRITICAL: rolling shutter compensation
+      two_d_mode:                  true            # Ground robot constraint
+      set_gravity_as_origin:       true            # Align with gravity on startup
+      depth_min_range:             0.3
+      set_floor_as_origin:         false
+      initial_base_pose:           [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # ── Sensors (IMU) ──
+    sensors:
+      sensors_image_sync:          true
+      publish_imu_tf:              false           # cuVSLAM manages this
+      sensors_timestamp_sync:      false
+
+    # ── Topics (what ZED publishes) ──
+    # These are the default topic names. Our launch file remaps them.
+    # ZED publishes:
+    #   /zed/zed_node/rgb/image_rect_color         → RGB for RTAB-Map
+    #   /zed/zed_node/depth/depth_registered        → Depth for filter node
+    #   /zed/zed_node/left/image_rect_gray          → Left for cuVSLAM
+    #   /zed/zed_node/right/image_rect_gray         → Right for cuVSLAM
+    #   /zed/zed_node/imu/data                      → IMU for cuVSLAM
+    #   /zed/zed_node/rgb/camera_info               → Intrinsics
+
+    # ── QoS ──
+    qos:
+      reliability:                 'RELIABLE'
+      durability:                  'VOLATILE'
+      depth:                       10
