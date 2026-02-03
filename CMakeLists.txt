@@ -207,6 +207,8 @@ install(DIRECTORY
 install(PROGRAMS
   scripts/jetson_setup.sh
   scripts/validate_slam.sh
+  scripts/coverage_monitor.py
+  scripts/session_recorder.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

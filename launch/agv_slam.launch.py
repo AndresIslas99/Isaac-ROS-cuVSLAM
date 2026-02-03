@@ -235,7 +235,44 @@ def generate_launch_description():
     )
 
     # ══════════════════════════════════════════════
-    # 8. FOXGLOVE BRIDGE (Optional Web Visualization)
+    # 8. COVERAGE MONITOR (Python)
+    # ══════════════════════════════════════════════
+    coverage_monitor = TimerAction(
+        period=12.0,
+        actions=[
+            Node(
+                package='agv_slam',
+                executable='coverage_monitor.py',
+                name='coverage_monitor',
+                output='screen',
+                parameters=[{
+                    'target_area_m2': 0.0,  # Set to greenhouse area for % tracking
+                    'publish_rate_hz': 0.5,
+                }],
+            ),
+        ]
+    )
+
+    # ══════════════════════════════════════════════
+    # 9. SESSION RECORDER (Python)
+    # ══════════════════════════════════════════════
+    session_recorder = TimerAction(
+        period=12.0,
+        actions=[
+            Node(
+                package='agv_slam',
+                executable='session_recorder.py',
+                name='session_recorder',
+                output='screen',
+                parameters=[{
+                    'output_dir': '/mnt/ssd/sessions',
+                }],
+            ),
+        ]
+    )
+
+    # ══════════════════════════════════════════════
+    # 10. FOXGLOVE BRIDGE (Optional Web Visualization)
     # ══════════════════════════════════════════════
     foxglove_bridge = Node(
         package='foxglove_bridge',
@@ -274,6 +311,10 @@ def generate_launch_description():
                 '/nvblox_node/combined_esdf_pointcloud',
                 '/nvblox_node/back_projected_depth',
                 '/nvblox_node/map_slice_bounds',
+                # Coverage + Session
+                '/coverage/status',
+                '/coverage/json',
+                '/session/status',
                 # Diagnostics
                 '/slam/diagnostics',
                 '/slam/quality',
@@ -341,6 +382,8 @@ def generate_launch_description():
 
         watchdog_node,
         monitor_node,
+        coverage_monitor,
+        session_recorder,
         foxglove_bridge,
         rviz_node,
 
