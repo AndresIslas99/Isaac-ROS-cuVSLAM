@@ -50,7 +50,7 @@ def generate_launch_description():
         description='Launch RViz for visualization')
 
     declare_foxglove = DeclareLaunchArgument(
-        'enable_foxglove', default_value='false',
+        'enable_foxglove', default_value='true',
         description='Launch Foxglove Bridge for web visualization')
 
     declare_database = DeclareLaunchArgument(
@@ -304,11 +304,27 @@ def generate_launch_description():
                 '/filtered/rgb',
                 '/filtered/depth',
                 '/filtered/camera_info',
+                '/zed/zed_node/imu/data',
+                '/zed/zed_node/left/gray/rect/image',
+                '/zed/zed_node/right/gray/rect/image',
+                '/zed/zed_node/rgb/color/rect/image',
+                '/zed/zed_node/depth/depth_registered',
                 '/visual_slam/tracking/odometry',
                 '/visual_slam/tracking/slam_path',
+                '/visual_slam/tracking/vo_path',
+                '/visual_slam/tracking/vo_pose',
+                '/visual_slam/status',
+                '/visual_slam/vis/landmarks_cloud',
+                '/visual_slam/vis/observations_cloud',
+                '/grid_map',
+                '/cloud_map',
+                '/cloud_obstacles',
+                '/cloud_ground',
+                '/mapData',
+                '/mapGraph',
                 '/rtabmap/grid_map',
                 '/rtabmap/cloud_map',
-                '/rtabmap/mapData',
+                '/zed/zed_node/point_cloud/cloud_registered',
                 '/slam/diagnostics',
                 '/slam/quality',
                 '/watchdog/heartbeat',

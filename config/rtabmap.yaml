@@ -142,7 +142,7 @@
     Grid/RangeMin:                '0.3'
     Grid/CellSize:                '0.05'           # 5cm cells (matches ±5cm target)
     Grid/RayTracing:              'false'          # Save CPU
-    Grid/3D:                      'false'          # 2D grid for nav2
+    Grid/3D:                      'true'           # 3D occupancy grid + point cloud
     Grid/MaxGroundHeight:         '0.15'           # 15cm = ground plane
     Grid/MaxObstacleHeight:       '2.0'            # 2m max obstacle
     Grid/NormalsSegmentation:     'true'

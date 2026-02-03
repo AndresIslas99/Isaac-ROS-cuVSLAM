@@ -1,0 +1,156 @@
+{
+  "configById": {
+    "3D!main": {
+      "cameraState": {
+        "perspective": true,
+        "distance": 15,
+        "phi": 45,
+        "thetaOffset": -45,
+        "targetOffset": [0, 0, 0],
+        "target": [0, 0, 0],
+        "targetOrientation": [0, 0, 0, 1],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "followTf": "base_link",
+      "scene": {
+        "backgroundColor": "#1a1a2e",
+        "enableStats": false
+      },
+      "transforms": {
+        "showLabel": false,
+        "axisScale": 0.5
+      },
+      "topics": {
+        "/cloud_map": {
+          "visible": true,
+          "pointSize": 2,
+          "colorMode": "rgb",
+          "flatColor": "#00d4ff"
+        },
+        "/cloud_obstacles": {
+          "visible": true,
+          "pointSize": 3,
+          "colorMode": "flat",
+          "flatColor": "#ff4444"
+        },
+        "/cloud_ground": {
+          "visible": true,
+          "pointSize": 1,
+          "colorMode": "flat",
+          "flatColor": "#44aa44"
+        },
+        "/zed/zed_node/point_cloud/cloud_registered": {
+          "visible": true,
+          "pointSize": 1,
+          "colorMode": "rgb",
+          "decayTime": 0
+        },
+        "/visual_slam/tracking/slam_path": {
+          "visible": true,
+          "type": "line",
+          "lineWidth": 2,
+          "gradient": ["#ff6b6b", "#ffd93d"]
+        },
+        "/tf": {
+          "visible": true
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point"
+      }
+    },
+    "Image!rgb": {
+      "cameraTopic": "",
+      "enabledMarkerTopics": [],
+      "imageTopic": "/filtered/rgb",
+      "transformMarkers": true,
+      "synchronize": false,
+      "smooth": false,
+      "rotation": 0,
+      "minValue": null,
+      "maxValue": null
+    },
+    "Image!depth": {
+      "cameraTopic": "",
+      "enabledMarkerTopics": [],
+      "imageTopic": "/filtered/depth",
+      "transformMarkers": true,
+      "synchronize": false,
+      "smooth": false,
+      "rotation": 0,
+      "minValue": 0,
+      "maxValue": 10,
+      "colorMode": "turbo"
+    },
+    "RawMessages!diagnostics": {
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "topicPath": "/slam/diagnostics"
+    },
+    "StateTransitions!odom": {
+      "paths": [
+        { "value": "/visual_slam/tracking/odometry.pose.pose.position.x", "label": "X", "timestampMethod": "receiveTime" },
+        { "value": "/visual_slam/tracking/odometry.pose.pose.position.y", "label": "Y", "timestampMethod": "receiveTime" }
+      ],
+      "xAxisVal": "timestamp"
+    },
+    "Plot!rates": {
+      "paths": [
+        { "value": "/slam/diagnostics.status[0].values[?(@.key=='rgb_hz')].value", "label": "RGB Hz" },
+        { "value": "/slam/diagnostics.status[0].values[?(@.key=='depth_hz')].value", "label": "Depth Hz" },
+        { "value": "/slam/diagnostics.status[0].values[?(@.key=='odom_hz')].value", "label": "Odom Hz" }
+      ],
+      "showSidebar": true,
+      "xAxisVal": "timestamp",
+      "minYValue": 0,
+      "maxYValue": 40
+    },
+    "Indicator!status": {
+      "path": "/slam/diagnostics.status[0].level",
+      "style": "background",
+      "fallbackColor": "#444444",
+      "fallbackLabel": "NO DATA",
+      "rules": [
+        { "operator": "=", "rawValue": "0", "color": "#00c853", "label": "SLAM OK" },
+        { "operator": "=", "rawValue": "1", "color": "#ffd600", "label": "SLAM WARN" },
+        { "operator": "=", "rawValue": "2", "color": "#ff1744", "label": "SLAM ERROR" }
+      ]
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1 },
+  "layout": {
+    "direction": "row",
+    "first": {
+      "direction": "column",
+      "first": "3D!main",
+      "second": {
+        "direction": "row",
+        "first": "Image!rgb",
+        "second": "Image!depth",
+        "splitPercentage": 50
+      },
+      "splitPercentage": 65
+    },
+    "second": {
+      "direction": "column",
+      "first": "Indicator!status",
+      "second": {
+        "direction": "column",
+        "first": "Plot!rates",
+        "second": "RawMessages!diagnostics",
+        "splitPercentage": 50
+      },
+      "splitPercentage": 10
+    },
+    "splitPercentage": 70
+  }
+}

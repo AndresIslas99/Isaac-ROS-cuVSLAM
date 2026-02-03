@@ -28,7 +28,7 @@
     accel_noise_density:             0.001862      # BMI085 spec: 120 μg/√Hz
     accel_random_walk:               0.003          # BMI085 typical
     calibration_frequency:           200.0         # IMU rate / 2
-    img_jitter_threshold_ms:         70.0          # Covers both 15fps (66ms) and 30fps (33ms)
+    image_jitter_threshold_ms:       70.0          # Covers both 15fps (66ms) and 30fps (33ms)
                                                     # Set to 40.0 once confirmed at 30fps
 
     # ── Tracking Parameters ──
