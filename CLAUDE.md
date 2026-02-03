@@ -1,5 +1,20 @@
 # CLAUDE.md — AI Assistant Guide for agv_slam
 
+> **For local Claude Code agents on Jetson**: This file is the root entry point. Read this first, then drill into the linked docs for detail on specific areas. Each directory has its own README.md with implementation-level context.
+
+## Documentation Map
+
+| Document | What it covers |
+|----------|---------------|
+| **CLAUDE.md** (this file) | Quick-reference overview, build/run, structure, conventions |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full system design, data flow, TF tree, QoS, compute budget, greenhouse tuning rationale |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Diagnostic commands, 9 common failure modes with fixes, performance baselines |
+| [docs/JETSON_DEPLOY.md](docs/JETSON_DEPLOY.md) | First-time Jetson setup, prerequisites, systemd service, map management |
+| [config/README.md](config/README.md) | Every parameter in every YAML/XML file with values, defaults, and rationale |
+| [src/README.md](src/README.md) | Node class details, method-level docs with line numbers, code style, "add a node" guide |
+| [launch/README.md](launch/README.md) | Launch arguments, node timing, remappings, mapping vs localization mode |
+| [scripts/README.md](scripts/README.md) | What each script does step-by-step, reversibility, prerequisites |
+
 ## Project Overview
 
 Industrial SLAM pipeline for an AGV (Automated Guided Vehicle) operating in greenhouse environments. Runs on **Jetson Orin AGX 64GB** with a **ZED 2i** stereo camera. Combines NVIDIA Isaac ROS cuVSLAM (GPU-accelerated visual-inertial odometry) with RTAB-Map (mapping + loop closure) for real-time localization and mapping.
@@ -27,7 +42,7 @@ ros2 launch agv_slam monitor.launch.py
 # Validate pipeline health
 bash scripts/validate_slam.sh [duration_seconds]
 
-# Jetson performance tuning
+# Jetson performance tuning (run once per boot, requires sudo)
 sudo bash scripts/jetson_setup.sh
 ```
 
@@ -37,48 +52,73 @@ sudo bash scripts/jetson_setup.sh
 
 ```
 agv_slam/
+├── CLAUDE.md               # THIS FILE — AI assistant entry point
+├── README.md               # Human-facing project README
 ├── CMakeLists.txt          # ament_cmake build, two C++ executables
 ├── package.xml             # ROS2 package manifest (format 3)
+├── docs/
+│   ├── ARCHITECTURE.md     # Full system design + data flow + tuning rationale
+│   ├── TROUBLESHOOTING.md  # 9 common issues with diagnostic steps + fixes
+│   └── JETSON_DEPLOY.md    # Hardware setup, first-time install, systemd, map mgmt
 ├── config/
-│   ├── cuvslam.yaml        # cuVSLAM GPU odometry parameters
-│   ├── rtabmap.yaml        # RTAB-Map mapping/loop closure parameters
-│   ├── depth_filter.yaml   # Depth preprocessing pipeline parameters
-│   ├── zed2i.yaml          # ZED 2i camera driver configuration
-│   └── cyclonedds.xml      # DDS shared-memory transport config
+│   ├── README.md           # Parameter-level docs for all config files
+│   ├── cuvslam.yaml        # cuVSLAM GPU odometry (IMU noise, frame IDs, VIO mode)
+│   ├── rtabmap.yaml        # RTAB-Map mapping (node creation, loop closure, GTSAM, grid)
+│   ├── depth_filter.yaml   # Depth preprocessing (range, temporal, bilateral, holes)
+│   ├── zed2i.yaml          # ZED 2i camera (NEURAL depth, confidence, resolution)
+│   └── cyclonedds.xml      # DDS transport (shared memory, buffers, localhost)
 ├── include/agv_slam/
-│   ├── depth_filter_node.hpp
-│   └── slam_monitor_node.hpp
+│   ├── depth_filter_node.hpp   # DepthFilterNode class declaration
+│   └── slam_monitor_node.hpp   # SlamMonitorNode class + RateTracker struct
 ├── src/
-│   ├── depth_filter_node.cpp   # Depth preprocessing (confidence, temporal, bilateral)
-│   └── slam_monitor_node.cpp   # 1Hz diagnostics publisher
+│   ├── README.md               # Node implementation details, method docs, code style
+│   ├── depth_filter_node.cpp   # 4-stage depth preprocessing (278 lines)
+│   └── slam_monitor_node.cpp   # 1Hz diagnostics publisher (164 lines)
 ├── launch/
-│   ├── agv_slam.launch.py      # Main pipeline orchestration
+│   ├── README.md               # Launch args, timing, remappings, modes
+│   ├── agv_slam.launch.py      # Main pipeline (5 nodes + static TF + env setup)
 │   └── monitor.launch.py       # RViz + rqt visualization
 ├── scripts/
-│   ├── jetson_setup.sh         # Orin power/clock tuning
-│   └── validate_slam.sh       # Runtime health checks
+│   ├── README.md               # Script docs, steps, reversibility
+│   ├── jetson_setup.sh         # 7-step Orin MAXN tuning (requires sudo)
+│   └── validate_slam.sh        # 5-check runtime health validation
 ├── rviz/
-│   └── slam.rviz              # Pre-configured visualization
+│   └── slam.rviz              # Pre-configured: TF, grid map, point cloud, images, odom
 └── urdf/
-    └── zed2i_mount.urdf.xacro # Camera mount TF geometry
+    └── zed2i_mount.urdf.xacro # Camera mount: base_link → camera_mount → zed2i_base_link
 ```
 
-## Architecture & Data Flow
+## Architecture Summary
 
 ```
-ZED 2i Driver ──► Depth Filter Node ──► cuVSLAM (GPU odometry)
-     │                  │                      │
-     │                  └──► RTAB-Map (mapping + loop closure)
-     │                              │
-     └──► SLAM Monitor Node ◄──────┘
+ZED 2i (30Hz RGB-D + 400Hz IMU)
+    │
+    ├── Stereo grayscale + IMU ──► cuVSLAM (GPU, 1.8ms/frame)
+    │                                   │
+    │                                   ├── /visual_slam/tracking/odometry
+    │                                   └── TF: odom → base_link
+    │
+    ├── RGB + Depth ──► Depth Filter Node (OpenCV, <1ms)
+    │                        │
+    │                        ├── /filtered/rgb
+    │                        ├── /filtered/depth
+    │                        └── /filtered/camera_info
+    │                                │
+    └────────────────────────────────┼──► RTAB-Map (mapping only, ~50ms)
+                                     │        │
+                                     │        ├── TF: map → odom
+                                     │        ├── /rtabmap/grid_map
+                                     │        └── /rtabmap/cloud_map
+                                     │
+                                     └──► SLAM Monitor (1Hz diagnostics)
+                                              └── /slam/diagnostics
 ```
 
-**TF tree**: `map → odom → base_link → zed2i_base_link → camera frames`
-- `map → odom`: RTAB-Map (loop closure corrections)
-- `odom → base_link`: cuVSLAM (real-time odometry)
-- `base_link → zed2i_base_link`: Static transform in launch file
+**TF tree**: `map → odom → base_link → zed2i_base_link → camera optical frames`
 
-**Launch sequence uses TimerAction delays**: ZED (0s) → Depth Filter (3s) → cuVSLAM (5s) → RTAB-Map (8s) → Monitor (10s).
+**Launch timing**: ZED (0s) → Depth Filter (3s) → cuVSLAM (5s) → RTAB-Map (8s) → Monitor (10s)
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete details including QoS policies, memory budget, and greenhouse-specific tuning rationale.
 
 ## Code Conventions
 
@@ -89,54 +129,80 @@ ZED 2i Driver ──► Depth Filter Node ──► cuVSLAM (GPU odometry)
 - **Member variables**: trailing underscore (`filtered_depth_pub_`)
 - **Headers**: `.hpp`, implementations: `.cpp`
 - **Include guards**: `#pragma once`
+- **Include order**: own header → STL → ROS → OpenCV
 - **Indentation**: 2 spaces
+- **Section markers**: `// ── Section Name ──`
 - **Compiler flags**: `-Wall -Wextra -Wpedantic -O3`
 - **Config files**: YAML for ROS2 parameters, XML for DDS only
 - **QoS**: `SensorDataQoS` (best effort) for sensor topics, reliable for diagnostics
+- **Error logging**: `RCLCPP_ERROR_THROTTLE` for recoverable, exception catch for cv_bridge
 
-## Custom Nodes (this package provides two)
+## Custom Nodes (this package builds two executables)
 
 ### depth_filter_node
-- Subscribes to ZED RGB + Depth with ApproximateTime sync
-- Applies: PassThrough → Temporal averaging → Bilateral smoothing → optional hole filling
-- Publishes filtered images on `/filtered/rgb`, `/filtered/depth`, `/filtered/camera_info`
-- Links: sensor_msgs, image_transport, cv_bridge, message_filters, OpenCV
+- **Class**: `DepthFilterNode` — `src/depth_filter_node.cpp` + `include/agv_slam/depth_filter_node.hpp`
+- Subscribes to ZED RGB + Depth with `ApproximateTime` sync (buffer=10)
+- 4-stage pipeline: PassThrough → Temporal averaging (deque, mutex) → Bilateral smoothing → Hole filling (Telea inpaint)
+- Publishes `/filtered/rgb`, `/filtered/depth`, `/filtered/camera_info`
+- Executor: `MultiThreadedExecutor` (2 threads)
+- Dependencies: sensor_msgs, image_transport, cv_bridge, message_filters, OpenCV
 
 ### slam_monitor_node
-- Subscribes to RGB, Depth, IMU, and Odometry topics
+- **Class**: `SlamMonitorNode` — `src/slam_monitor_node.cpp` + `include/agv_slam/slam_monitor_node.hpp`
+- Subscribes to RGB, Depth, IMU, Odometry — tracks rates via `RateTracker` (EMA, mutex)
 - Publishes `diagnostic_msgs/DiagnosticArray` on `/slam/diagnostics` at 1Hz
-- Links: diagnostic_msgs, nav_msgs, tf2_ros
+- Checks TF chain `map → base_link`, tracks odometry distance
+- Health thresholds: RGB/Depth/Odom < 10Hz = WARN, IMU < 100Hz = WARN
+- Dependencies: diagnostic_msgs, nav_msgs, tf2_ros
 
-## External Dependencies (not built here)
+See [src/README.md](src/README.md) for method-level documentation with line numbers.
 
-| Package | Role |
-|---------|------|
-| `zed_wrapper` / `zed_ros2` | ZED 2i camera driver |
-| `isaac_ros_visual_slam` | NVIDIA cuVSLAM GPU odometry |
-| `rtabmap_ros` / `rtabmap_slam` | Mapping + loop closure |
-| `rmw_cyclonedds_cpp` | DDS middleware with shared memory |
+## External Dependencies (runtime only, not built here)
 
-## Configuration Notes
+| Package | Role | Config file |
+|---------|------|-------------|
+| `zed_wrapper` / `zed_ros2` | ZED 2i camera driver | `config/zed2i.yaml` |
+| `isaac_ros_visual_slam` | NVIDIA cuVSLAM GPU odometry | `config/cuvslam.yaml` |
+| `rtabmap_ros` / `rtabmap_slam` | Mapping + loop closure | `config/rtabmap.yaml` |
+| `rmw_cyclonedds_cpp` | DDS middleware | `config/cyclonedds.xml` |
 
-- **cuvslam.yaml**: IMU fusion enabled, ground constraint on, mapping/landmarks disabled (RTAB-Map handles those)
-- **rtabmap.yaml**: Tuned for greenhouse rows — aggressive loop closure (threshold 0.09), spatial proximity detection, GFTT+ORB features, GTSAM optimizer, 3DoF constraint (X,Y,Yaw)
-- **zed2i.yaml**: NEURAL depth mode, HD720@30fps, strict confidence filtering, internal VIO for rolling shutter correction only (`publish_tf: false`)
-- **cyclonedds.xml**: Shared memory enabled, 10MB buffers, localhost only
-- **Map database**: Stored at `/home/orza/slam_maps/greenhouse.db`
+## Key Configuration Decisions
+
+| Decision | Parameter | Value | Why |
+|----------|-----------|-------|-----|
+| Map node every 5cm | `RGBD/LinearUpdate` | `0.05` | Default 0.1m too sparse for slow AGV |
+| Aggressive loop closure | `Rtabmap/LoopThr` | `0.09` | Greenhouse rows look similar, need lower threshold |
+| Spatial proximity | `RGBD/ProximityBySpace` | `true` | Row revisits detected by position, not appearance |
+| GFTT+ORB features | `Vis/FeatureType` | `8` | Uniform distribution across image (vs clustering on plants) |
+| GTSAM optimizer | `Optimizer/Strategy` | `2` | Gravity-aware graph optimization |
+| 3DoF only | `Reg/Force3DoF` | `true` | Ground robot: X, Y, Yaw only |
+| Unlimited memory | `Rtabmap/MemoryThr` | `0` | Exploit 64GB RAM |
+| NEURAL depth | `depth_mode` | `NEURAL` | Best accuracy on Orin AGX at 34fps |
+| VIO-only cuVSLAM | `enable_localization_n_mapping` | `false` | RTAB-Map does mapping, cuVSLAM just tracks |
+
+See [config/README.md](config/README.md) for complete parameter documentation.
 
 ## Target Platform
 
-- **Hardware**: NVIDIA Jetson Orin AGX 64GB + ZED 2i stereo camera
+- **Hardware**: NVIDIA Jetson Orin AGX 64GB + ZED 2i (USB 3.0)
 - **Software**: JetPack 6.2+, Isaac ROS 3.2+, ZED SDK 5.1+, ROS2 Humble
 - **No Docker** — runs directly on Jetson with system ROS2
-- **DDS**: CycloneDDS (set via `RMW_IMPLEMENTATION` env var in launch)
+- **DDS**: CycloneDDS with shared memory (set automatically by launch file)
+- **Workspace path**: `~/agv_slam_ws/` (source in `src/agv_slam/`)
+- **Map storage**: `/home/orza/slam_maps/greenhouse.db`
+
+See [docs/JETSON_DEPLOY.md](docs/JETSON_DEPLOY.md) for full deployment guide.
 
 ## Common Tasks
 
-**Adding a new parameter**: Declare in the relevant `config/*.yaml`, load via `get_parameter()` in the node constructor.
+**Adding a new parameter**: Declare in `config/*.yaml`, add `declare_parameter()` + `get_parameter()` in node constructor. Rebuild only if C++ code changed; YAML changes take effect on next launch with `--symlink-install`.
 
-**Adding a new node**: Create `.hpp` in `include/agv_slam/`, `.cpp` in `src/`, add `add_executable()` + `ament_target_dependencies()` + `install(TARGETS)` in `CMakeLists.txt`, include in launch file with appropriate TimerAction delay.
+**Adding a new node**: Create `.hpp` in `include/agv_slam/`, `.cpp` in `src/`, add `add_executable()` + `ament_target_dependencies()` + `install(TARGETS)` in `CMakeLists.txt`, add to launch file with appropriate `TimerAction` delay. See [src/README.md](src/README.md) for template.
 
-**Modifying the pipeline**: Edit `launch/agv_slam.launch.py`. Nodes are launched with TimerAction delays to ensure proper initialization order. Respect the dependency chain: ZED → Depth Filter → cuVSLAM → RTAB-Map.
+**Modifying the pipeline**: Edit `launch/agv_slam.launch.py`. Respect the dependency chain: ZED → Depth Filter → cuVSLAM → RTAB-Map. See [launch/README.md](launch/README.md) for details.
 
-**Tuning SLAM parameters**: Edit `config/rtabmap.yaml` for mapping behavior, `config/cuvslam.yaml` for odometry. The greenhouse environment requires spatial proximity detection and aggressive loop closure for repetitive rows.
+**Tuning SLAM for a new environment**: Edit `config/rtabmap.yaml`. Key levers: `RGBD/LinearUpdate` (node spacing), `Rtabmap/LoopThr` (closure sensitivity), `Vis/MinInliers` (feature match strictness), `RGBD/LocalRadius` (proximity search range).
+
+**Diagnosing issues**: Run `bash scripts/validate_slam.sh 15` while pipeline is active. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for the 9 most common failure modes.
+
+**Deploying to a new Jetson**: Follow [docs/JETSON_DEPLOY.md](docs/JETSON_DEPLOY.md) from the top. Critical steps: JetPack + ZED SDK + Isaac ROS install, workspace build, `jetson_setup.sh` on each boot, camera mount TF calibration.
