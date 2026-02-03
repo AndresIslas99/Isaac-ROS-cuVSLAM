@@ -1,11 +1,11 @@
 # =============================================================================
-# AGV SLAM Launch File — Industrial-Grade Pipeline with Crash Recovery
+# AGV SLAM Launch File — cuVSLAM + nvblox Pipeline
 # =============================================================================
 # Launch order (handled by events):
 #   1. ZED 2i Node (sensor driver)
 #   2. Depth Filter (C++ preprocessing)
 #   3. cuVSLAM (GPU visual-inertial odometry)
-#   4. RTAB-Map (mapping + loop closure only)
+#   4. nvblox (GPU TSDF mesh reconstruction)
 #   5. Pipeline Watchdog (crash recovery)
 #   6. SLAM Monitor (diagnostics)
 #   7. Foxglove Bridge (optional web visualization)
@@ -13,7 +13,6 @@
 # Usage:
 #   ros2 launch agv_slam agv_slam.launch.py
 #   ros2 launch agv_slam agv_slam.launch.py enable_rviz:=true
-#   ros2 launch agv_slam agv_slam.launch.py localization:=true
 #   ros2 launch agv_slam agv_slam.launch.py enable_foxglove:=true
 # =============================================================================
 
@@ -23,11 +22,10 @@ from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
-    GroupAction,
     TimerAction,
     LogInfo,
 )
-from launch.conditions import IfCondition, UnlessCondition
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetParameter, LoadComposableNodes, ComposableNodeContainer
@@ -41,10 +39,6 @@ def generate_launch_description():
     pkg_zed_wrapper = get_package_share_directory('zed_wrapper')
 
     # ── Launch arguments ──
-    declare_localization = DeclareLaunchArgument(
-        'localization', default_value='false',
-        description='true = localize on existing map, false = build new map')
-
     declare_rviz = DeclareLaunchArgument(
         'enable_rviz', default_value='false',
         description='Launch RViz for visualization')
@@ -52,11 +46,6 @@ def generate_launch_description():
     declare_foxglove = DeclareLaunchArgument(
         'enable_foxglove', default_value='true',
         description='Launch Foxglove Bridge for web visualization')
-
-    declare_database = DeclareLaunchArgument(
-        'database_path',
-        default_value='/mnt/ssd/slam_maps/greenhouse.db',
-        description='Path to RTAB-Map database file (NVMe SSD for performance)')
 
     declare_sim_time = DeclareLaunchArgument(
         'use_sim_time', default_value='false',
@@ -88,10 +77,8 @@ def generate_launch_description():
     set_sim_time = SetParameter('use_sim_time', LaunchConfiguration('use_sim_time'))
 
     # ══════════════════════════════════════════════
-    # 1. SLAM CONTAINER (shared by ZED + cuVSLAM)
+    # 1. SLAM CONTAINER (shared by ZED + cuVSLAM + nvblox)
     # ══════════════════════════════════════════════
-    # Both ZED and cuVSLAM run in the same container for intra-process
-    # zero-copy image transport (NITROS-compatible).
     slam_container = ComposableNodeContainer(
         name='slam_container',
         namespace='zed',
@@ -123,7 +110,6 @@ def generate_launch_description():
     # ══════════════════════════════════════════════
     # 3. DEPTH FILTER NODE (C++) — with respawn
     # ══════════════════════════════════════════════
-    # Waits 3s for ZED to initialize
     depth_filter_node = TimerAction(
         period=3.0,
         actions=[
@@ -135,7 +121,6 @@ def generate_launch_description():
                     os.path.join(pkg_agv_slam, 'config', 'depth_filter.yaml'),
                 ],
                 remappings=[
-                    # Input from ZED — topic names match ZED SDK v5.1+
                     ('/zed/zed_node/depth/depth_registered',
                      '/zed/zed_node/depth/depth_registered'),
                     ('/zed/zed_node/rgb/image_rect_color',
@@ -152,8 +137,6 @@ def generate_launch_description():
     # ══════════════════════════════════════════════
     # 4. ISAAC ROS cuVSLAM (GPU Visual-Inertial Odometry)
     # ══════════════════════════════════════════════
-    # Loaded into slam_container for intra-process zero-copy transport.
-    # Waits 5s for ZED to be fully publishing.
     load_cuvslam = TimerAction(
         period=5.0,
         actions=[
@@ -168,12 +151,10 @@ def generate_launch_description():
                             os.path.join(pkg_agv_slam, 'config', 'cuvslam.yaml'),
                         ],
                         remappings=[
-                            # Stereo input from ZED (rectified grayscale) — ZED SDK v5.1+
                             ('visual_slam/image_0', '/zed/zed_node/left/gray/rect/image'),
                             ('visual_slam/camera_info_0', '/zed/zed_node/left/gray/rect/camera_info'),
                             ('visual_slam/image_1', '/zed/zed_node/right/gray/rect/image'),
                             ('visual_slam/camera_info_1', '/zed/zed_node/right/gray/rect/camera_info'),
-                            # IMU input
                             ('visual_slam/imu', '/zed/zed_node/imu/data'),
                         ],
                     ),
@@ -183,78 +164,41 @@ def generate_launch_description():
     )
 
     # ══════════════════════════════════════════════
-    # 4. RTAB-MAP (Mapping + Loop Closure Only)
+    # 5. NVBLOX (GPU TSDF Mesh Reconstruction)
     # ══════════════════════════════════════════════
-    # Waits 8s for cuVSLAM to provide odometry
-    #
-    # Two modes:
-    #   mapping:       Builds new map from scratch
-    #   localization:  Localizes on existing map (database_path must exist)
-
-    rtabmap_node = TimerAction(
+    # Loaded into slam_container for intra-process transport.
+    # Uses TF from cuVSLAM (odom -> base_link -> zed_camera_link).
+    # Subscribes to ZED depth + color directly (GPU TSDF doesn't
+    # need our CPU depth filter preprocessing).
+    load_nvblox = TimerAction(
         period=8.0,
         actions=[
-            Node(
-                package='rtabmap_slam',
-                executable='rtabmap',
-                name='rtabmap',
-                parameters=[
-                    os.path.join(pkg_agv_slam, 'config', 'rtabmap.yaml'),
-                    {
-                        'database_path': LaunchConfiguration('database_path'),
-                        'Mem/IncrementalMemory': 'true',
-                    },
-                ],
-                remappings=[
-                    # RGB-D input (from depth filter)
-                    ('rgb/image', '/filtered/rgb'),
-                    ('depth/image', '/filtered/depth'),
-                    ('rgb/camera_info', '/filtered/camera_info'),
-                    # Odometry from cuVSLAM
-                    ('odom', '/visual_slam/tracking/odometry'),
-                    # IMU for gravity
-                    ('imu', '/zed/zed_node/imu/data'),
-                ],
-                output='screen',
-                arguments=[
-                    '--delete_db_on_start',  # Remove for persistent mapping
-                    '--ros-args', '--log-level', 'info',
+            LoadComposableNodes(
+                target_container='/zed/slam_container',
+                composable_node_descriptions=[
+                    ComposableNode(
+                        package='nvblox_ros',
+                        plugin='nvblox::NvbloxNode',
+                        name='nvblox_node',
+                        parameters=[
+                            os.path.join(pkg_agv_slam, 'config', 'nvblox.yaml'),
+                        ],
+                        remappings=[
+                            # Depth from ZED
+                            ('camera_0/depth/image', '/zed/zed_node/depth/depth_registered'),
+                            ('camera_0/depth/camera_info', '/zed/zed_node/depth/camera_info'),
+                            # Color from ZED (SDK v5.1+ topic naming)
+                            ('camera_0/color/image', '/zed/zed_node/rgb/color/rect/image'),
+                            ('camera_0/color/camera_info', '/zed/zed_node/rgb/camera_info'),
+                        ],
+                    ),
                 ],
             ),
         ]
     )
 
-    # For localization mode, don't delete the database
-    rtabmap_localization = TimerAction(
-        period=8.0,
-        actions=[
-            Node(
-                package='rtabmap_slam',
-                executable='rtabmap',
-                name='rtabmap',
-                parameters=[
-                    os.path.join(pkg_agv_slam, 'config', 'rtabmap.yaml'),
-                    {
-                        'database_path': LaunchConfiguration('database_path'),
-                        'Mem/IncrementalMemory': 'false',
-                        'Mem/InitWMWithAllNodes': 'true',
-                    },
-                ],
-                remappings=[
-                    ('rgb/image', '/filtered/rgb'),
-                    ('depth/image', '/filtered/depth'),
-                    ('rgb/camera_info', '/filtered/camera_info'),
-                    ('odom', '/visual_slam/tracking/odometry'),
-                    ('imu', '/zed/zed_node/imu/data'),
-                ],
-                output='screen',
-                arguments=['--ros-args', '--log-level', 'info'],
-            ),
-        ]
-    )
-
     # ══════════════════════════════════════════════
-    # 5. PIPELINE WATCHDOG (Crash Recovery)
+    # 6. PIPELINE WATCHDOG (Crash Recovery)
     # ══════════════════════════════════════════════
     watchdog_node = TimerAction(
         period=10.0,
@@ -276,7 +220,7 @@ def generate_launch_description():
     )
 
     # ══════════════════════════════════════════════
-    # 6. SLAM MONITOR (Diagnostics)
+    # 7. SLAM MONITOR (Diagnostics)
     # ══════════════════════════════════════════════
     monitor_node = TimerAction(
         period=10.0,
@@ -291,7 +235,7 @@ def generate_launch_description():
     )
 
     # ══════════════════════════════════════════════
-    # 7. FOXGLOVE BRIDGE (Optional Web Visualization)
+    # 8. FOXGLOVE BRIDGE (Optional Web Visualization)
     # ══════════════════════════════════════════════
     foxglove_bridge = Node(
         package='foxglove_bridge',
@@ -302,14 +246,18 @@ def generate_launch_description():
             'address': '0.0.0.0',
             'send_buffer_limit': 100000000,
             'topic_whitelist': [
-                '/filtered/rgb',
-                '/filtered/depth',
-                '/filtered/camera_info',
+                # ZED raw
                 '/zed/zed_node/imu/data',
                 '/zed/zed_node/left/gray/rect/image',
                 '/zed/zed_node/right/gray/rect/image',
                 '/zed/zed_node/rgb/color/rect/image',
                 '/zed/zed_node/depth/depth_registered',
+                '/zed/zed_node/point_cloud/cloud_registered',
+                # Depth filter
+                '/filtered/rgb',
+                '/filtered/depth',
+                '/filtered/camera_info',
+                # cuVSLAM
                 '/visual_slam/tracking/odometry',
                 '/visual_slam/tracking/slam_path',
                 '/visual_slam/tracking/vo_path',
@@ -317,18 +265,20 @@ def generate_launch_description():
                 '/visual_slam/status',
                 '/visual_slam/vis/landmarks_cloud',
                 '/visual_slam/vis/observations_cloud',
-                '/grid_map',
-                '/cloud_map',
-                '/cloud_obstacles',
-                '/cloud_ground',
-                '/mapData',
-                '/mapGraph',
-                '/rtabmap/grid_map',
-                '/rtabmap/cloud_map',
-                '/zed/zed_node/point_cloud/cloud_registered',
+                # nvblox outputs
+                '/nvblox_node/mesh',
+                '/nvblox_node/static_map_slice',
+                '/nvblox_node/mesh_marker',
+                '/nvblox_node/static_esdf_pointcloud',
+                '/nvblox_node/static_tsdf_pointcloud',
+                '/nvblox_node/combined_esdf_pointcloud',
+                '/nvblox_node/back_projected_depth',
+                '/nvblox_node/map_slice_bounds',
+                # Diagnostics
                 '/slam/diagnostics',
                 '/slam/quality',
                 '/watchdog/heartbeat',
+                # TF
                 '/tf',
                 '/tf_static',
             ],
@@ -338,7 +288,7 @@ def generate_launch_description():
     )
 
     # ══════════════════════════════════════════════
-    # 8. RVIZ (Optional)
+    # 9. RVIZ (Optional)
     # ══════════════════════════════════════════════
     rviz_node = Node(
         package='rviz2',
@@ -351,18 +301,16 @@ def generate_launch_description():
     # ══════════════════════════════════════════════
     # STATIC TF: base_link -> camera
     # ══════════════════════════════════════════════
-    # Adjust these values to match your physical camera mount
-    # x=forward, y=left, z=up from base_link center
     static_tf_base_to_camera = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='base_to_camera_tf',
         arguments=[
-            '--x', '0.1',        # Camera 10cm forward of base center
+            '--x', '0.1',
             '--y', '0.0',
-            '--z', '0.3',        # Camera 30cm above base (adjust for your mount)
+            '--z', '0.3',
             '--roll', '0.0',
-            '--pitch', '0.087',  # ~5 deg downward tilt (0.087 rad)
+            '--pitch', '0.087',
             '--yaw', '0.0',
             '--frame-id', 'base_link',
             '--child-frame-id', 'zed_camera_link',
@@ -372,10 +320,8 @@ def generate_launch_description():
     # ── Assembly ──
     return LaunchDescription([
         # Arguments
-        declare_localization,
         declare_rviz,
         declare_foxglove,
-        declare_database,
         declare_sim_time,
 
         # Environment
@@ -385,22 +331,13 @@ def generate_launch_description():
         set_sim_time,
 
         # Pipeline
-        LogInfo(msg='=== AGV SLAM Industrial Pipeline Starting ==='),
+        LogInfo(msg='=== AGV SLAM + nvblox Pipeline Starting ==='),
         static_tf_base_to_camera,
         slam_container,
         zed_node,
         depth_filter_node,
         load_cuvslam,
-
-        # Choose mapping or localization mode
-        GroupAction(
-            actions=[rtabmap_node],
-            condition=UnlessCondition(LaunchConfiguration('localization')),
-        ),
-        GroupAction(
-            actions=[rtabmap_localization],
-            condition=IfCondition(LaunchConfiguration('localization')),
-        ),
+        load_nvblox,
 
         watchdog_node,
         monitor_node,
@@ -408,5 +345,6 @@ def generate_launch_description():
         rviz_node,
 
         LogInfo(msg='=== All nodes launched. Monitor: /slam/diagnostics ==='),
+        LogInfo(msg='=== nvblox mesh: /nvblox_node/mesh ==='),
         LogInfo(msg='=== Foxglove: ws://192.168.55.1:8765 (if enabled) ==='),
     ])

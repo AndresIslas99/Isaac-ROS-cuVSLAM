@@ -2,11 +2,10 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>agv_slam</name>
-  <version>2.0.0</version>
+  <version>3.0.0</version>
   <description>
-    Industrial-grade SLAM pipeline for greenhouse AGV inspection.
-    ZED 2i + cuVSLAM (odometry) + RTAB-Map (mapping/loop closure).
-    Includes: pipeline watchdog, CUDA depth filter, Qt5 GUI, map quality metrics.
+    AGV greenhouse inspection pipeline: ZED 2i + cuVSLAM (odometry) + nvblox (TSDF mesh).
+    Includes: pipeline watchdog, CUDA depth filter, diagnostics monitor.
   </description>
   <maintainer email="andres@agv.local">Andres</maintainer>
   <license>MIT</license>
@@ -30,11 +29,9 @@
   <exec_depend>zed_wrapper</exec_depend>
   <exec_depend>zed_ros2</exec_depend>
 
-  <!-- SLAM -->
+  <!-- SLAM + Mapping -->
   <exec_depend>isaac_ros_visual_slam</exec_depend>
-  <exec_depend>rtabmap_ros</exec_depend>
-  <exec_depend>rtabmap_slam</exec_depend>
-  <exec_depend>rtabmap_viz</exec_depend>
+  <exec_depend>nvblox_ros</exec_depend>
 
   <!-- DDS -->
   <exec_depend>rmw_cyclonedds_cpp</exec_depend>

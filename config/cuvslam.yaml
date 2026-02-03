@@ -54,7 +54,7 @@
     # Must match your URDF/TF tree
     map_frame:                       'map'
     odom_frame:                      'odom'
-    base_frame:                      'zed_camera_link'
+    base_frame:                      'base_link'
     # Camera frames are set via launch file remapping
 
     # ── Output ──
