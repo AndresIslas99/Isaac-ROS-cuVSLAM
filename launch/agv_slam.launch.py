@@ -114,7 +114,7 @@ def generate_launch_description():
             'container_name': 'slam_container',
             'ros_params_override_path': os.path.join(pkg_agv_slam, 'config', 'zed2i.yaml'),
             'publish_urdf': 'true',
-            'publish_tf': 'true',
+            'publish_tf': 'false',
             'publish_map_tf': 'false',
             'publish_imu_tf': 'true',
         }.items()
