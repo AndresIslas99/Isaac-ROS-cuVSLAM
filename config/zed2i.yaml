@@ -21,10 +21,11 @@
 
     # ── Depth Sensing — THE CRITICAL SECTION ──
     depth:
-      depth_mode:                  'NEURAL'       # Best accuracy/speed on Orin AGX
-                                                   # NEURAL: 34fps, <1% error at 4m
+      depth_mode:                  'PERFORMANCE'  # 60fps capable, lighter GPU load
+                                                   # Frees GPU headroom for cuVSLAM + GUI
+                                                   # Adequate quality for indoor 0.3-10m range
+                                                   # NEURAL: 34fps, best quality (use if needed)
                                                    # NEURAL_PLUS: 10fps, not worth it
-                                                   # ULTRA: 15fps, worse accuracy
       depth_stabilization:         50              # 1-100. Higher = smoother (temporal)
                                                    # 50 is good balance for moving robot
       depth_confidence:            50              # 0-100. LOWER = stricter filtering

@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  CycloneDDS Configuration for AGV SLAM Pipeline
-  
+  CycloneDDS Configuration for AGV SLAM Pipeline — Production Grade
+
   Why CycloneDDS over FastDDS:
   - Better handling of large messages (images, point clouds)
   - Lower latency for intra-process communication
   - Shared memory transport on Jetson
   - More predictable QoS behavior
-  
+
   Set in environment:
     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     export CYCLONEDDS_URI=file:///path/to/this/cyclonedds.xml
@@ -22,11 +22,13 @@
         <NetworkInterface name="lo" />
       </Interfaces>
       <AllowMulticast>default</AllowMulticast>
+      <MaxMessageSize>65500B</MaxMessageSize>
+      <FragmentSize>32768B</FragmentSize>
     </General>
 
     <Internal>
-      <!-- Large receive buffers for image/depth/pointcloud data -->
-      <SocketReceiveBufferSize min="10MB" />
+      <!-- Production buffers: 26MB to match sysctl setting -->
+      <SocketReceiveBufferSize min="26MB" />
       <Watermarks>
         <WhcHigh>500kB</WhcHigh>
       </Watermarks>
@@ -37,7 +39,7 @@
     <!-- Shared memory transport: zero-copy between nodes -->
     <SharedMemory>
       <Enable>true</Enable>
-      <LogLevel>info</LogLevel>
+      <LogLevel>warning</LogLevel>
     </SharedMemory>
 
     <Tracing>

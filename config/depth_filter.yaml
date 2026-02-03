@@ -16,11 +16,14 @@
 
     # ── Temporal averaging ──
     enable_temporal:             true
-    temporal_window:             3                # Average 3 frames (~100ms at 30fps)
-                                                  # Higher = smoother but more lag
+    temporal_window:             2                # Average 2 frames (~67ms at 30fps)
+                                                  # Reduced from 3: lower latency at 30Hz
+                                                  # ZED depth_stabilization handles smoothing
 
     # ── Bilateral filter ──
-    enable_bilateral:            true
+    enable_bilateral:            false            # Disabled: saves ~5ms/frame
+                                                  # ZED PERFORMANCE + depth_stabilization
+                                                  # already handles edge smoothing
     bilateral_d:                 5                # Kernel diameter (keep small for speed)
     bilateral_sigma_color:       50.0             # Color similarity (depth domain)
     bilateral_sigma_space:       50.0             # Spatial proximity

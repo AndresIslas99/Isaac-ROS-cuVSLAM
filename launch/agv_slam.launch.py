@@ -1,17 +1,20 @@
 # =============================================================================
-# AGV SLAM Launch File — Complete Industrial Pipeline
+# AGV SLAM Launch File — Industrial-Grade Pipeline with Crash Recovery
 # =============================================================================
 # Launch order (handled by events):
 #   1. ZED 2i Node (sensor driver)
 #   2. Depth Filter (C++ preprocessing)
 #   3. cuVSLAM (GPU visual-inertial odometry)
 #   4. RTAB-Map (mapping + loop closure only)
-#   5. SLAM Monitor (diagnostics)
+#   5. Pipeline Watchdog (crash recovery)
+#   6. SLAM Monitor (diagnostics)
+#   7. Foxglove Bridge (optional web visualization)
 #
 # Usage:
 #   ros2 launch agv_slam agv_slam.launch.py
 #   ros2 launch agv_slam agv_slam.launch.py enable_rviz:=true
 #   ros2 launch agv_slam agv_slam.launch.py localization:=true
+#   ros2 launch agv_slam agv_slam.launch.py enable_foxglove:=true
 # =============================================================================
 
 import os
@@ -23,8 +26,10 @@ from launch.actions import (
     GroupAction,
     TimerAction,
     LogInfo,
+    RegisterEventHandler,
 )
 from launch.conditions import IfCondition, UnlessCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
     LaunchConfiguration,
@@ -50,10 +55,14 @@ def generate_launch_description():
         'enable_rviz', default_value='false',
         description='Launch RViz for visualization')
 
+    declare_foxglove = DeclareLaunchArgument(
+        'enable_foxglove', default_value='false',
+        description='Launch Foxglove Bridge for web visualization')
+
     declare_database = DeclareLaunchArgument(
         'database_path',
-        default_value='/home/orza/slam_maps/greenhouse.db',
-        description='Path to RTAB-Map database file')
+        default_value='/mnt/ssd/slam_maps/greenhouse.db',
+        description='Path to RTAB-Map database file (NVMe SSD for performance)')
 
     declare_sim_time = DeclareLaunchArgument(
         'use_sim_time', default_value='false',
@@ -86,7 +95,7 @@ def generate_launch_description():
     )
 
     # ══════════════════════════════════════════════
-    # 2. DEPTH FILTER NODE (C++)
+    # 2. DEPTH FILTER NODE (C++) — with respawn
     # ══════════════════════════════════════════════
     # Waits 3s for ZED to initialize
     depth_filter_node = TimerAction(
@@ -108,12 +117,14 @@ def generate_launch_description():
                 ],
                 output='screen',
                 arguments=['--ros-args', '--log-level', 'info'],
+                respawn=True,
+                respawn_delay=5.0,
             ),
         ]
     )
 
     # ══════════════════════════════════════════════
-    # 3. ISAAC ROS cuVSLAM (GPU Visual-Inertial Odometry)
+    # 3. ISAAC ROS cuVSLAM (GPU Visual-Inertial Odometry) — with respawn
     # ══════════════════════════════════════════════
     # Waits 5s for ZED to be fully publishing
     cuvslam_node = TimerAction(
@@ -136,6 +147,8 @@ def generate_launch_description():
                     ('visual_slam/imu', '/zed/zed_node/imu/data'),
                 ],
                 output='screen',
+                respawn=True,
+                respawn_delay=5.0,
             ),
         ]
     )
@@ -218,7 +231,29 @@ def generate_launch_description():
     )
 
     # ══════════════════════════════════════════════
-    # 5. SLAM MONITOR (Diagnostics)
+    # 5. PIPELINE WATCHDOG (Crash Recovery)
+    # ══════════════════════════════════════════════
+    watchdog_node = TimerAction(
+        period=10.0,
+        actions=[
+            Node(
+                package='agv_slam',
+                executable='pipeline_watchdog_node',
+                name='pipeline_watchdog',
+                output='screen',
+                parameters=[{
+                    'log_directory': '/mnt/ssd/slam_logs/',
+                    'heartbeat_rate': 1.0,
+                    'node_timeout_sec': 10.0,
+                }],
+                respawn=True,
+                respawn_delay=5.0,
+            ),
+        ]
+    )
+
+    # ══════════════════════════════════════════════
+    # 6. SLAM MONITOR (Diagnostics)
     # ══════════════════════════════════════════════
     monitor_node = TimerAction(
         period=10.0,
@@ -233,7 +268,38 @@ def generate_launch_description():
     )
 
     # ══════════════════════════════════════════════
-    # 6. RVIZ (Optional)
+    # 7. FOXGLOVE BRIDGE (Optional Web Visualization)
+    # ══════════════════════════════════════════════
+    foxglove_bridge = Node(
+        package='foxglove_bridge',
+        executable='foxglove_bridge',
+        name='foxglove_bridge',
+        parameters=[{
+            'port': 8765,
+            'address': '0.0.0.0',
+            'send_buffer_limit': 100000000,
+            'topic_whitelist': [
+                '/filtered/rgb',
+                '/filtered/depth',
+                '/filtered/camera_info',
+                '/visual_slam/tracking/odometry',
+                '/visual_slam/tracking/slam_path',
+                '/rtabmap/grid_map',
+                '/rtabmap/cloud_map',
+                '/rtabmap/mapData',
+                '/slam/diagnostics',
+                '/slam/quality',
+                '/watchdog/heartbeat',
+                '/tf',
+                '/tf_static',
+            ],
+        }],
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('enable_foxglove')),
+    )
+
+    # ══════════════════════════════════════════════
+    # 8. RVIZ (Optional)
     # ══════════════════════════════════════════════
     rviz_node = Node(
         package='rviz2',
@@ -244,7 +310,7 @@ def generate_launch_description():
     )
 
     # ══════════════════════════════════════════════
-    # STATIC TF: base_link → camera
+    # STATIC TF: base_link -> camera
     # ══════════════════════════════════════════════
     # Adjust these values to match your physical camera mount
     # x=forward, y=left, z=up from base_link center
@@ -257,7 +323,7 @@ def generate_launch_description():
             '--y', '0.0',
             '--z', '0.3',        # Camera 30cm above base (adjust for your mount)
             '--roll', '0.0',
-            '--pitch', '0.087',  # ~5° downward tilt (0.087 rad)
+            '--pitch', '0.087',  # ~5 deg downward tilt (0.087 rad)
             '--yaw', '0.0',
             '--frame-id', 'base_link',
             '--child-frame-id', 'zed2i_base_link',
@@ -269,6 +335,7 @@ def generate_launch_description():
         # Arguments
         declare_localization,
         declare_rviz,
+        declare_foxglove,
         declare_database,
         declare_sim_time,
 
@@ -278,7 +345,7 @@ def generate_launch_description():
         set_sim_time,
 
         # Pipeline
-        LogInfo(msg='=== AGV SLAM Pipeline Starting ==='),
+        LogInfo(msg='=== AGV SLAM Industrial Pipeline Starting ==='),
         static_tf_base_to_camera,
         zed_node,
         depth_filter_node,
@@ -294,8 +361,11 @@ def generate_launch_description():
             condition=IfCondition(LaunchConfiguration('localization')),
         ),
 
+        watchdog_node,
         monitor_node,
+        foxglove_bridge,
         rviz_node,
 
         LogInfo(msg='=== All nodes launched. Monitor: /slam/diagnostics ==='),
+        LogInfo(msg='=== Foxglove: ws://192.168.50.100:8765 (if enabled) ==='),
     ])

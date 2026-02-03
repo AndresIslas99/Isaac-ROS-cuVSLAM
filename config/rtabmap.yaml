@@ -21,8 +21,8 @@
     subscribe_odom:               true             # From cuVSLAM
     subscribe_odom_info:          false
     approx_sync:                  true
-    approx_sync_max_interval:     0.05             # 50ms tolerance
-    queue_size:                   10
+    approx_sync_max_interval:     0.1              # 100ms tolerance (more sync margin)
+    queue_size:                   30               # Buffer bursts at 30Hz input
     qos_image:                    2                # SensorDataQoS
     qos_camera_info:              2
     qos_odom:                     2
@@ -84,8 +84,8 @@
     # rotation-invariant and fast on ARM.
 
     # Visual features for loop closure
-    Vis/FeatureType:              '8'              # 8 = GFTT/ORB
-    Vis/MaxFeatures:              '1000'           # Enough for indoor
+    Vis/FeatureType:              '6'              # 6 = ORB-GPU (CUDA accelerated on Orin)
+    Vis/MaxFeatures:              '1500'           # More features for better matching
     Vis/MinInliers:               '15'             # Reduced for repetitive textures
     Vis/InlierDistance:            '0.05'           # 5cm inlier tolerance
     Vis/MaxDepth:                 '8.0'            # Trust depth up to 8m
@@ -94,8 +94,8 @@
     Vis/EpipolarConstraintVariance: '0.1'
 
     # Keypoint vocabulary for bag-of-words matching
-    Kp/DetectorStrategy:          '8'              # Must match Vis/FeatureType
-    Kp/MaxFeatures:               '600'
+    Kp/DetectorStrategy:          '6'              # Must match Vis/FeatureType (ORB-GPU)
+    Kp/MaxFeatures:               '750'            # Half of Vis/MaxFeatures for vocabulary
     Kp/MaxDepth:                  '8.0'
     Kp/MinDepth:                  '0.3'
     Kp/NNStrategy:                '3'              # BruteForce for binary descriptors
@@ -108,10 +108,11 @@
                                                     # 0 = TORO (no gravity)
                                                     # 1 = g2o (limited gravity)
     Optimizer/GravitySigma:       '0.3'            # IMU gravity alignment weight
-    Optimizer/Iterations:         '100'            # Thorough optimization
+    Optimizer/Iterations:         '200'            # More iterations for tighter ±5cm accuracy
     Optimizer/Robust:             'true'           # Huber robust cost function
     Optimizer/VarianceIgnored:    'false'
-    RGBD/OptimizeMaxError:        '3.0'            # Reject loop closures with >3m error
+    RGBD/OptimizeMaxError:        '1.0'            # Reject loop closures with >1m error (tighter)
+    RGBD/ProximityOdomGuess:      'false'          # Use actual position for proximity detection
 
     # ══════════════════════════════════════════════
     # GROUND ROBOT CONSTRAINTS

@@ -2,10 +2,11 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>agv_slam</name>
-  <version>1.0.0</version>
+  <version>2.0.0</version>
   <description>
     Industrial-grade SLAM pipeline for greenhouse AGV inspection.
     ZED 2i + cuVSLAM (odometry) + RTAB-Map (mapping/loop closure).
+    Includes: pipeline watchdog, CUDA depth filter, Qt5 GUI, map quality metrics.
   </description>
   <maintainer email="andres@agv.local">Andres</maintainer>
   <license>MIT</license>
@@ -20,6 +21,7 @@
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>tf2_ros</depend>
+  <depend>tf2</depend>
   <depend>image_transport</depend>
   <depend>cv_bridge</depend>
   <depend>message_filters</depend>
@@ -36,6 +38,9 @@
 
   <!-- DDS -->
   <exec_depend>rmw_cyclonedds_cpp</exec_depend>
+
+  <!-- Visualization (optional) -->
+  <exec_depend>foxglove_bridge</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

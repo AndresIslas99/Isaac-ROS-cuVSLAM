@@ -28,7 +28,9 @@
     accel_noise_density:             0.001862      # BMI085 spec: 120 μg/√Hz
     accel_random_walk:               0.003          # BMI085 typical
     calibration_frequency:           200.0         # IMU rate / 2
-    img_jitter_threshold_ms:         34.0          # ~1 frame at 30fps
+    img_jitter_threshold_ms:         40.0          # 30fps + margin for jitter
+                                                    # Was 34.0, caused warnings at ~66ms delta
+                                                    # Increase further (70.0) if still at 15fps
 
     # ── Tracking Parameters ──
     enable_slam_visualization:       false         # Save GPU for RTAB-Map
@@ -45,8 +47,9 @@
     # On Orin AGX MAXN, cuVSLAM uses ~1.7% GPU, ~5% CPU
     # These settings prioritize reliability over absolute speed
     num_cameras:                     2             # Stereo pair
-    image_buffer_size:               100
+    image_buffer_size:               50            # Reduced: less buffering = faster processing
     imu_buffer_size:                 200
+    enable_debug_imu_mode:           false         # Production: no debug overhead
 
     # ── Frame IDs ──
     # Must match your URDF/TF tree
