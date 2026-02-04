@@ -11,7 +11,7 @@
 #
 # Published:
 #   /coverage/grid    (nav_msgs/OccupancyGrid) at 0.5 Hz
-#   /coverage/status  (agv_greenhouse_msgs/msg/CoverageStatus) at 1 Hz
+#   /coverage/status  (std_msgs/String JSON) at 1 Hz
 # Service:
 #   /coverage/reset   (std_srvs/Trigger)
 # =============================================================================
@@ -94,7 +94,8 @@ try:
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-    from agv_greenhouse_msgs.msg import CoverageStatus
+    from std_msgs.msg import String as CoverageStatusStr
+    import json
     from nav_msgs.msg import OccupancyGrid, Odometry
     from std_srvs.srv import Trigger
     from geometry_msgs.msg import Pose
@@ -146,7 +147,7 @@ try:
 
             # Publishers
             self.grid_pub = self.create_publisher(OccupancyGrid, '/coverage/grid', 10)
-            self.status_pub = self.create_publisher(CoverageStatus, '/coverage/status', 10)
+            self.status_pub = self.create_publisher(CoverageStatusStr, '/coverage/status', 10)
 
             # Services
             self.reset_srv = self.create_service(
@@ -241,15 +242,19 @@ try:
             seen = int(np.sum(self.grid >= SEEN_ONCE))
             well = int(np.sum(self.grid >= WELL_COVERED))
 
-            msg = CoverageStatus()
-            msg.stamp = self.get_clock().now().to_msg()
-            msg.total_cells = total
-            msg.seen_cells = seen
-            msg.well_covered_cells = well
-            msg.coverage_percent = (seen / total * 100.0) if total > 0 else 0.0
-            msg.well_covered_percent = (well / total * 100.0) if total > 0 else 0.0
-            msg.mapped_area_m2 = seen * (self.resolution ** 2)
-            msg.grid_resolution = self.resolution
+            coverage_pct = (seen / total * 100.0) if total > 0 else 0.0
+            well_pct = (well / total * 100.0) if total > 0 else 0.0
+            mapped_area = seen * (self.resolution ** 2)
+            msg = CoverageStatusStr()
+            msg.data = json.dumps({
+                "total_cells": total,
+                "seen_cells": seen,
+                "well_covered_cells": well,
+                "coverage_percent": round(coverage_pct, 2),
+                "well_covered_percent": round(well_pct, 2),
+                "mapped_area_m2": round(mapped_area, 2),
+                "grid_resolution": self.resolution,
+            })
             self.status_pub.publish(msg)
 
     def main(args=None):
@@ -259,9 +264,17 @@ try:
         node.destroy_node()
         rclpy.shutdown()
 
+    _entry_main = main
+
 except ImportError:
-    # ROS2 not available — standalone utility functions still importable
-    pass
+    _entry_main = None
+
+
+def main(args=None):
+    if _entry_main is not None:
+        _entry_main(args)
+    else:
+        raise RuntimeError('ROS2 (rclpy) is not available')
 
 
 if __name__ == '__main__':

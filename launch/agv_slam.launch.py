@@ -118,6 +118,7 @@ def generate_launch_description():
             'publish_tf': 'false',
             'publish_map_tf': 'false',
             'publish_imu_tf': 'true',
+            'enable_ipc': 'false',
         }.items()
     )
 
@@ -171,6 +172,7 @@ def generate_launch_description():
                             ('visual_slam/camera_info_1', '/zed/zed_node/right/gray/rect/camera_info'),
                             ('visual_slam/imu', '/zed/zed_node/imu/data'),
                         ],
+                        extra_arguments=[{'use_intra_process_comms': False}],
                     ),
                 ],
             ),
@@ -205,6 +207,7 @@ def generate_launch_description():
                             ('camera_0/color/image', '/zed/zed_node/rgb/color/rect/image'),
                             ('camera_0/color/camera_info', '/zed/zed_node/rgb/camera_info'),
                         ],
+                        extra_arguments=[{'use_intra_process_comms': False}],
                     ),
                 ],
             ),

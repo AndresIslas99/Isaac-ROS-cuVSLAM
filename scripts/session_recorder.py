@@ -10,10 +10,10 @@
 #   5. Session manifest with checksums
 #
 # Services:
-#   /session/start_recording  (agv_greenhouse_msgs/srv/StartRecording)
-#   /session/stop_recording   (agv_greenhouse_msgs/srv/StopRecording)
+#   /session/start_recording  (std_srvs/Trigger)
+#   /session/stop_recording   (std_srvs/Trigger)
 # Published:
-#   /session/info             (agv_greenhouse_msgs/msg/SessionInfo)
+#   /session/info             (std_msgs/String JSON)
 # =============================================================================
 
 import hashlib
@@ -80,8 +80,9 @@ try:
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-    from agv_greenhouse_msgs.srv import StartRecording, StopRecording
-    from agv_greenhouse_msgs.msg import SessionInfo
+    from std_srvs.srv import Trigger
+    from std_msgs.msg import String as SessionInfoStr
+    import json as _json
     from nav_msgs.msg import Odometry
     import subprocess
     import signal
@@ -141,12 +142,12 @@ try:
 
             # Services
             self.start_srv = self.create_service(
-                StartRecording, '/session/start_recording', self.start_recording)
+                Trigger, '/session/start_recording', self.start_recording)
             self.stop_srv = self.create_service(
-                StopRecording, '/session/stop_recording', self.stop_recording)
+                Trigger, '/session/stop_recording', self.stop_recording)
 
             # SessionInfo publisher
-            self.info_pub = self.create_publisher(SessionInfo, '/session/info', 10)
+            self.info_pub = self.create_publisher(SessionInfoStr, '/session/info', 10)
             self.info_timer = self.create_timer(1.0, self.publish_info)
 
             # Disk space check timer
@@ -189,7 +190,7 @@ try:
 
             # Create session
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-            self.session_id = request.session_name if request.session_name else f'session_{ts}'
+            self.session_id = f'session_{ts}'
             self.session_dir = os.path.join(self.output_dir, self.session_id)
             os.makedirs(self.session_dir, exist_ok=True)
 
@@ -231,9 +232,7 @@ try:
 
             self.get_logger().info(f'Recording started: {self.session_dir}')
             response.success = True
-            response.session_id = self.session_id
-            response.session_path = self.session_dir
-            response.message = f'Recording to {self.session_dir}'
+            response.message = f'Recording to {self.session_dir} (id={self.session_id})'
             return response
 
         def stop_recording(self, request, response):
@@ -245,11 +244,8 @@ try:
             duration = self._do_stop()
 
             response.success = True
-            response.session_path = self.session_dir
-            response.duration_seconds = duration
-            response.total_frames = self.frame_count
             response.message = (
-                f'Session saved: {self.frame_count} frames, {duration:.1f}s')
+                f'Session saved: {self.frame_count} frames, {duration:.1f}s, path={self.session_dir}')
             return response
 
         def _do_stop(self):
@@ -342,21 +338,27 @@ try:
                 json.dump(manifest, f, indent=2)
 
         def publish_info(self):
-            msg = SessionInfo()
-            msg.stamp = self.get_clock().now().to_msg()
-            msg.session_id = self.session_id
-            msg.session_path = self.session_dir
-            msg.recording_active = self.recording
-            msg.frame_count = self.frame_count
+            info = {
+                'session_id': self.session_id,
+                'session_path': self.session_dir,
+                'recording_active': self.recording,
+                'frame_count': self.frame_count,
+                'duration_seconds': 0.0,
+                'disk_usage_gb': 0.0,
+                'disk_free_gb': -1.0,
+                'status_message': 'Recording' if self.recording else 'Idle',
+            }
             if self.recording:
-                msg.duration_seconds = time.time() - self.start_time
-                msg.disk_usage_gb = self._dir_size_gb(self.session_dir) if self.session_dir else 0.0
+                info['duration_seconds'] = round(time.time() - self.start_time, 1)
+                info['disk_usage_gb'] = round(
+                    self._dir_size_gb(self.session_dir) if self.session_dir else 0.0, 3)
             try:
                 stat = shutil.disk_usage(self.output_dir)
-                msg.disk_free_gb = stat.free / (1024 ** 3)
+                info['disk_free_gb'] = round(stat.free / (1024 ** 3), 2)
             except Exception:
-                msg.disk_free_gb = -1.0
-            msg.status_message = 'Recording' if self.recording else 'Idle'
+                pass
+            msg = SessionInfoStr()
+            msg.data = _json.dumps(info)
             self.info_pub.publish(msg)
 
         def check_disk_space(self):
@@ -385,9 +387,17 @@ try:
             node.destroy_node()
             rclpy.shutdown()
 
+    _entry_main = main
+
 except ImportError:
-    # ROS2 not available — standalone utility functions still importable
-    pass
+    _entry_main = None
+
+
+def main(args=None):
+    if _entry_main is not None:
+        _entry_main(args)
+    else:
+        raise RuntimeError('ROS2 (rclpy) is not available')
 
 
 if __name__ == '__main__':

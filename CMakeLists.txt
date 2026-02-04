@@ -17,6 +17,7 @@ find_package(image_transport REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(agv_greenhouse_msgs QUIET)
 find_package(OpenCV REQUIRED)
@@ -46,6 +47,7 @@ target_include_directories(depth_filter_node PUBLIC
 ament_target_dependencies(depth_filter_node
   rclcpp
   sensor_msgs
+  std_msgs
   image_transport
   cv_bridge
   message_filters
@@ -68,7 +70,10 @@ ament_target_dependencies(slam_monitor_node
   std_msgs
   diagnostic_msgs
   nav_msgs
+  geometry_msgs
+  visualization_msgs
   tf2_ros
+  OpenCV
 )
 
 # ══════════════════════════════════════════════
@@ -253,8 +258,11 @@ if(BUILD_TESTING)
     std_msgs
     diagnostic_msgs
     nav_msgs
+    geometry_msgs
+    visualization_msgs
     tf2_ros
     tf2
+    OpenCV
   )
 
   # ── Python unit tests ──

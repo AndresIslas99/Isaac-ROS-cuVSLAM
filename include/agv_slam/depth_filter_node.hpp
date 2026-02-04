@@ -3,6 +3,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <std_msgs/msg/float32.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <image_transport/image_transport.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
@@ -21,21 +23,13 @@ public:
   explicit DepthFilterNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
 private:
-  // Callback for synchronized RGB + Depth
   void depth_callback(
     const sensor_msgs::msg::Image::ConstSharedPtr & depth_msg,
     const sensor_msgs::msg::Image::ConstSharedPtr & rgb_msg);
 
-  // Apply confidence-based filtering
   void apply_confidence_filter(cv::Mat & depth, float min_val, float max_val);
-
-  // Apply temporal averaging over N frames
   void apply_temporal_filter(cv::Mat & depth);
-
-  // Apply bilateral edge-preserving smoothing
   void apply_bilateral_filter(const cv::Mat & input, cv::Mat & output);
-
-  // Apply morphological closing to fill small holes
   void apply_hole_filling(cv::Mat & depth);
 
   // Subscribers
@@ -74,6 +68,10 @@ private:
   std::string input_rgb_topic_;
   std::string output_depth_topic_;
   std::string output_rgb_topic_;
+
+  // Monitoring publishers
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr latency_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr quality_pub_;
 
   // Stats
   uint64_t frames_processed_ = 0;

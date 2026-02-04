@@ -1,6 +1,8 @@
 #include "agv_slam/depth_filter_node.hpp"
 #include <chrono>
 #include <algorithm>
+#include <sstream>
+#include <cmath>
 
 namespace agv_slam
 {
@@ -64,6 +66,12 @@ DepthFilterNode::DepthFilterNode(const rclcpp::NodeOptions & options)
       cam_info_pub_->publish(*msg);
     });
 
+  // ── Monitoring publishers ──
+  latency_pub_ = this->create_publisher<std_msgs::msg::Float32>(
+    "/depth_filter/latency", 10);
+  quality_pub_ = this->create_publisher<std_msgs::msg::String>(
+    "/depth_filter/quality", 10);
+
   RCLCPP_INFO(this->get_logger(),
     "Depth filter initialized: range=[%.1f, %.1f]m, temporal=%d, bilateral=%s",
     min_depth_, max_depth_, temporal_window_,
@@ -76,7 +84,7 @@ void DepthFilterNode::depth_callback(
 {
   auto t_start = std::chrono::steady_clock::now();
 
-  // Convert to OpenCV
+  // Convert to OpenCV — use toCvCopy since we modify in-place
   cv_bridge::CvImagePtr depth_cv;
   try {
     depth_cv = cv_bridge::toCvCopy(depth_msg, sensor_msgs::image_encodings::TYPE_32FC1);
@@ -87,22 +95,40 @@ void DepthFilterNode::depth_callback(
   }
 
   cv::Mat & depth = depth_cv->image;
-
-  // ── Stage 1: PassThrough + NaN removal ──
-  uint64_t removed_this_frame = 0;
-  apply_confidence_filter(depth, min_depth_, max_depth_);
-
-  // Count removed points for diagnostics
   int total_pixels = depth.rows * depth.cols;
-  int valid_pixels = cv::countNonZero(depth == depth);  // NaN != NaN
-  removed_this_frame = total_pixels - valid_pixels;
 
-  // ── Stage 2: Temporal averaging (reduces flickering noise) ──
+  // ── Stage 1: PassThrough + NaN removal + quality metrics (single pass) ──
+  // Combined: apply range filter AND compute valid count + depth sum in one pass
+  int valid_pixels = 0;
+  double depth_sum = 0.0;
+  uint64_t removed_this_frame = 0;
+  {
+    const float min_d = min_depth_;
+    const float max_d = max_depth_;
+    const float nan_val = std::numeric_limits<float>::quiet_NaN();
+
+    for (int r = 0; r < depth.rows; ++r) {
+      float * row = depth.ptr<float>(r);
+      for (int c = 0; c < depth.cols; ++c) {
+        float d = row[c];
+        // NaN check: d != d is true for NaN
+        if (d != d || d < min_d || d > max_d) {
+          row[c] = nan_val;
+          removed_this_frame++;
+        } else {
+          valid_pixels++;
+          depth_sum += static_cast<double>(d);
+        }
+      }
+    }
+  }
+
+  // ── Stage 2: Temporal averaging ──
   if (enable_temporal_ && temporal_window_ > 1) {
     apply_temporal_filter(depth);
   }
 
-  // ── Stage 3: Bilateral smoothing (edge-preserving) ──
+  // ── Stage 3: Bilateral smoothing ──
   if (enable_bilateral_) {
     cv::Mat smoothed;
     apply_bilateral_filter(depth, smoothed);
@@ -117,161 +143,134 @@ void DepthFilterNode::depth_callback(
   // ── Publish filtered depth ──
   filtered_depth_pub_->publish(*depth_cv->toImageMsg());
 
-  // ── Publish RGB passthrough (same timestamp for sync) ──
+  // ── Publish RGB passthrough ──
   filtered_rgb_pub_->publish(*rgb_msg);
+
+  // ── Timing ──
+  auto t_end = std::chrono::steady_clock::now();
+  double latency_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+
+  // ── Publish latency ──
+  std_msgs::msg::Float32 latency_msg;
+  latency_msg.data = static_cast<float>(latency_ms);
+  latency_pub_->publish(latency_msg);
+
+  // ── Publish quality JSON (metrics already computed in Stage 1) ──
+  double valid_ratio = (total_pixels > 0) ?
+    static_cast<double>(valid_pixels) / static_cast<double>(total_pixels) : 0.0;
+  double mean_depth = (valid_pixels > 0) ? depth_sum / valid_pixels : 0.0;
+
+  {
+    std::ostringstream json;
+    json << std::fixed;
+    json.precision(3);
+    json << "{\"valid_ratio\":" << valid_ratio
+         << ",\"mean_depth\":" << mean_depth
+         << ",\"latency_ms\":" << latency_ms << "}";
+
+    std_msgs::msg::String quality_msg;
+    quality_msg.data = json.str();
+    quality_pub_->publish(quality_msg);
+  }
 
   // ── Diagnostics ──
   frames_processed_++;
   points_removed_ += removed_this_frame;
 
   if (frames_processed_ % 100 == 0) {
-    auto t_end = std::chrono::steady_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
     double removal_pct = (static_cast<double>(removed_this_frame) / total_pixels) * 100.0;
-
     RCLCPP_INFO(this->get_logger(),
       "Frame %lu: %.1fms, removed %.1f%% invalid pixels, %d valid remaining",
-      frames_processed_, ms, removal_pct, valid_pixels);
+      frames_processed_, latency_ms, removal_pct, valid_pixels);
   }
 }
 
 void DepthFilterNode::apply_confidence_filter(
   cv::Mat & depth, float min_val, float max_val)
 {
-  // Set out-of-range and NaN pixels to 0 (invalid)
-  // This is faster than per-pixel if/else using OpenCV parallel ops
-  cv::Mat mask_nan;
-  cv::Mat mask_range;
-
-  // NaN mask: NaN != NaN is true
-  mask_nan = (depth != depth);
-
-  // Range mask
-  mask_range = (depth < min_val) | (depth > max_val);
-
-  // Combined invalid mask
+  // Note: This function is kept for API compatibility but the main callback
+  // now uses an optimized single-pass implementation instead.
+  cv::Mat mask_nan = (depth != depth);
+  cv::Mat mask_range = (depth < min_val) | (depth > max_val);
   cv::Mat invalid = mask_nan | mask_range;
-
-  // Set invalid pixels to NaN (RTAB-Map expects NaN for missing depth)
   depth.setTo(std::numeric_limits<float>::quiet_NaN(), invalid);
 }
 
 void DepthFilterNode::apply_temporal_filter(cv::Mat & depth)
 {
   std::lock_guard<std::mutex> lock(buffer_mutex_);
-
-  // Add current frame to buffer
   temporal_buffer_.push_back(depth.clone());
-
-  // Keep only N frames
   while (static_cast<int>(temporal_buffer_.size()) > temporal_window_) {
     temporal_buffer_.pop_front();
   }
+  if (temporal_buffer_.size() < 2) return;
 
-  if (temporal_buffer_.size() < 2) {
-    return;
-  }
-
-  // Compute median of valid values per pixel
-  // For efficiency, use running average instead of true median
   cv::Mat accumulator = cv::Mat::zeros(depth.size(), CV_32FC1);
   cv::Mat count = cv::Mat::zeros(depth.size(), CV_32FC1);
-
   for (const auto & frame : temporal_buffer_) {
-    cv::Mat valid_mask = (frame == frame);  // Not NaN
+    cv::Mat valid_mask = (frame == frame);
     cv::Mat valid_float;
     valid_mask.convertTo(valid_float, CV_32FC1, 1.0 / 255.0);
-
     cv::Mat clean_frame = frame.clone();
     clean_frame.setTo(0, ~valid_mask);
-
     accumulator += clean_frame;
     count += valid_float;
   }
-
-  // Avoid division by zero
   cv::Mat safe_count = cv::max(count, 1.0f);
   cv::Mat averaged = accumulator / safe_count;
-
-  // Restore NaN where no frames had valid data
-  cv::Mat no_data = (count < 0.5f);
-  averaged.setTo(std::numeric_limits<float>::quiet_NaN(), no_data);
-
+  averaged.setTo(std::numeric_limits<float>::quiet_NaN(), (count < 0.5f));
   depth = averaged;
 }
 
 void DepthFilterNode::apply_bilateral_filter(
   const cv::Mat & input, cv::Mat & output)
 {
-  // Bilateral filter doesn't handle NaN — replace with 0 temporarily
   cv::Mat clean_input = input.clone();
   cv::Mat nan_mask = (input != input);
   clean_input.setTo(0, nan_mask);
-
   cv::bilateralFilter(clean_input, output, bilateral_d_,
     bilateral_sigma_color_, bilateral_sigma_space_);
-
-  // Restore NaN positions
   output.setTo(std::numeric_limits<float>::quiet_NaN(), nan_mask);
 }
 
 void DepthFilterNode::apply_hole_filling(cv::Mat & depth)
 {
-  // Morphological closing fills small holes
-  cv::Mat valid_mask = (depth == depth);  // Not NaN
+  cv::Mat valid_mask = (depth == depth);
   cv::Mat binary;
   valid_mask.convertTo(binary, CV_8UC1);
-
   cv::Mat kernel = cv::getStructuringElement(
-    cv::MORPH_ELLIPSE,
-    cv::Size(hole_kernel_size_, hole_kernel_size_));
-
+    cv::MORPH_ELLIPSE, cv::Size(hole_kernel_size_, hole_kernel_size_));
   cv::Mat closed;
   cv::morphologyEx(binary, closed, cv::MORPH_CLOSE, kernel);
-
-  // For newly filled pixels, interpolate from neighbors
   cv::Mat new_pixels = closed & ~binary;
   if (cv::countNonZero(new_pixels) == 0) return;
 
-  // Use inpainting for the small holes (Telea method, fast)
   cv::Mat depth_8u;
   double min_val, max_val;
   cv::minMaxLoc(depth, &min_val, &max_val, nullptr, nullptr, valid_mask);
   if (max_val <= min_val) return;
-
   cv::Mat normalized = (depth - min_val) / (max_val - min_val) * 255.0;
   normalized.setTo(0, ~valid_mask);
   normalized.convertTo(depth_8u, CV_8UC1);
-
   cv::Mat inpaint_mask;
   new_pixels.convertTo(inpaint_mask, CV_8UC1);
-
   cv::Mat inpainted;
   cv::inpaint(depth_8u, inpaint_mask, inpainted, 3, cv::INPAINT_TELEA);
-
-  // Convert back to float depth
   cv::Mat inpainted_float;
   inpainted.convertTo(inpainted_float, CV_32FC1);
   inpainted_float = inpainted_float / 255.0 * (max_val - min_val) + min_val;
-
-  // Only fill the new pixels
   inpainted_float.copyTo(depth, new_pixels);
 }
 
 }  // namespace agv_slam
 
-// ── Main ──
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-
   auto node = std::make_shared<agv_slam::DepthFilterNode>();
-
-  // Use multi-threaded executor for parallel callback processing
   rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
   executor.add_node(node);
   executor.spin();
-
   rclcpp::shutdown();
   return 0;
 }
