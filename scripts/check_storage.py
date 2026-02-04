@@ -25,6 +25,7 @@ RATE_TOTAL_GB_MIN = RATE_BAG_GB_MIN + RATE_SVO_GB_MIN
 
 
 def get_storage_info(path):
+    """Retrieve disk usage statistics for a given path."""
     stat = shutil.disk_usage(path)
     return {
         'total_gb': stat.total / (1024 ** 3),
@@ -35,6 +36,11 @@ def get_storage_info(path):
 
 
 def count_sessions(path):
+    """Count recording sessions and their total size on disk.
+
+    Returns:
+        Tuple of (session_count, total_size_gb).
+    """
     sessions_dir = os.path.join(path, 'sessions') if not path.endswith('sessions') else path
     if not os.path.exists(sessions_dir):
         return 0, 0.0
@@ -47,6 +53,22 @@ def count_sessions(path):
                 for f in filenames:
                     total_size += os.path.getsize(os.path.join(dirpath, f))
     return count, total_size / (1024 ** 3)
+
+
+def estimate_recording_time_hours(path, gb_per_hour=2.0):
+    """Estimate how many hours of recording time remain based on free disk space.
+
+    Args:
+        path: Filesystem path to check.
+        gb_per_hour: Estimated data rate in GB/hour.
+
+    Returns:
+        Estimated hours of recording time remaining.
+    """
+    info = get_storage_info(path)
+    if gb_per_hour <= 0:
+        return float('inf')
+    return info['free_gb'] / gb_per_hour
 
 
 def print_report(path):

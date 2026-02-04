@@ -7,6 +7,7 @@
 
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <cstdio>
 #include <cmath>
 
 // ── CUDA error checking macro ──

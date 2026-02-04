@@ -18,7 +18,7 @@ find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
-find_package(agv_greenhouse_msgs REQUIRED)
+find_package(agv_greenhouse_msgs QUIET)
 find_package(OpenCV REQUIRED)
 
 # ── Optional: CUDA for GPU depth filter ──
@@ -215,5 +215,57 @@ install(PROGRAMS
   scripts/export_session.sh
   DESTINATION lib/${PROJECT_NAME}
 )
+
+# ══════════════════════════════════════════════
+# Testing
+# ══════════════════════════════════════════════
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
+
+  # ── C++ unit tests ──
+
+  # RateTracker (standalone, no ROS deps)
+  ament_add_gtest(test_rate_tracker test/test_rate_tracker.cpp)
+  target_include_directories(test_rate_tracker PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+
+  # TegraStats parser (standalone, no ROS deps)
+  ament_add_gtest(test_tegrastats_parser test/test_tegrastats_parser.cpp)
+  target_include_directories(test_tegrastats_parser PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+
+  # SlamMonitorNode (requires ROS + node source)
+  ament_add_gtest(test_slam_monitor_node
+    test/test_slam_monitor_node.cpp
+    src/slam_monitor_node.cpp
+  )
+  target_include_directories(test_slam_monitor_node PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+  target_compile_definitions(test_slam_monitor_node PRIVATE AGV_SLAM_BUILDING_TESTS)
+  ament_target_dependencies(test_slam_monitor_node
+    rclcpp
+    sensor_msgs
+    std_msgs
+    diagnostic_msgs
+    nav_msgs
+    tf2_ros
+    tf2
+  )
+
+  # ── Python unit tests ──
+  ament_add_pytest_test(test_coverage_monitor test/test_coverage_monitor.py)
+  ament_add_pytest_test(test_session_recorder test/test_session_recorder.py)
+  ament_add_pytest_test(test_check_storage test/test_check_storage.py)
+
+  # ── Integration test (launch_testing) ──
+  add_launch_test(test/test_pipeline_launch.py
+    TIMEOUT 60
+  )
+endif()
 
 ament_package()

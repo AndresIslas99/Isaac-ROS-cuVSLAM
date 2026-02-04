@@ -390,6 +390,7 @@ void SlamMonitorNode::publish_diagnostics()
 
 }  // namespace agv_slam
 
+#ifndef AGV_SLAM_BUILDING_TESTS
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
@@ -398,3 +399,4 @@ int main(int argc, char ** argv)
   rclcpp::shutdown();
   return 0;
 }
+#endif
