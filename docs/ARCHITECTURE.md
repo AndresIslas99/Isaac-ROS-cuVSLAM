@@ -1,170 +1,193 @@
-# System Architecture
+# Jetson SLAM Pipeline Architecture -- v3.0.0
 
-## Design Philosophy
+## Overview
 
-This pipeline separates visual-inertial odometry (VIO) from mapping/loop-closure. NVIDIA cuVSLAM runs VIO on the GPU at 1.8ms/frame, freeing RTAB-Map to focus exclusively on graph optimization and loop closure at ~50ms/frame. Without this split, RTAB-Map attempted all tasks simultaneously at 435ms/frame, making 30Hz operation impossible.
+The v3.0.0 stack runs on a Jetson Orin AGX 64GB (R36.4.7) with ROS2 Humble and CycloneDDS. The pipeline combines a ZED 2i stereo camera with NVIDIA cuVSLAM for visual-inertial odometry and nvblox for mesh/voxel reconstruction. RTAB-Map has been fully removed as of v3.0.0.
 
-## Pipeline Data Flow
+## Data Flow
 
 ```
-                          STEREO GRAYSCALE (30Hz)
-    ZED 2i ──────────────────────────────────────────► cuVSLAM (GPU)
-      │                                                    │
-      │  RGB + Depth (30Hz)                                │ /visual_slam/tracking/odometry
-      │                                                    │ TF: odom → base_link
-      ▼                                                    │
-  Depth Filter Node                                        │
-      │                                                    │
-      │  /filtered/rgb                                     │
-      │  /filtered/depth                                   │
-      │  /filtered/camera_info                             │
-      ▼                                                    ▼
-  RTAB-Map  ◄──────────────────────────────────────────────┘
-      │         (receives odometry + filtered RGB-D + IMU)
-      │
-      │  TF: map → odom (loop closure corrections)
-      │  /rtabmap/grid_map (2D nav grid)
-      │  /rtabmap/cloud_map (3D point cloud)
-      │  /rtabmap/mapData (full graph)
-      │
-      ▼
-  SLAM Monitor Node
-      │
-      │  /slam/diagnostics (1Hz health report)
-      ▼
-  [Navigation stack / operator]
+ZED 2i (HD1080@15fps, IMU@400Hz)
+  |
+  |--- /zed/left/image_rect_color -----+
+  |--- /zed/right/image_rect_color ----+---> cuVSLAM (stereo VIO)
+  |--- /zed/imu/data -----------------+        |
+  |                                             |---> /visual_slam/tracking/odometry
+  |                                             |---> /tf (odom->base_link)
+  |
+  |--- /zed/depth/depth_registered ---> depth_filter_node (4-stage)
+  |                                        |
+  |                                        |---> /depth_filter/filtered
+  |                                        |---> /depth_filter/latency (Float32)
+  |                                        |---> /depth_filter/quality (String JSON)
+  |                                        |
+  |                                        +---> nvblox
+  |                                                |
+  |                                                |---> /nvblox_node/mesh
+  |                                                |---> /nvblox_node/map_slice
+  |
+  +---> slam_monitor_node
+  |        |---> /slam/quality (String JSON, ~50 fields)
+  |
+  +---> pipeline_watchdog_node
+  |        |---> /watchdog/heartbeat
+  |
+  +---> coverage_monitor.py
+  |        |---> /coverage/grid
+  |        |---> /coverage/status
+  |
+  +---> session_recorder.py
+           |---> /session/info
+           |---> /session/start_recording (std_srvs/Trigger)
+           |---> /session/stop_recording  (std_srvs/Trigger)
 ```
 
-## Node Responsibilities
+## Composable Container Design
 
-### ZED 2i Driver (external: `zed_wrapper`)
-- Publishes rectified stereo grayscale, RGB, depth, IMU, camera_info
-- Runs NEURAL depth inference on GPU (~34fps at HD720)
-- Internal VIO enabled ONLY for rolling shutter compensation (`publish_tf: false`)
-- IMU at 400Hz (BMI085), images at 30Hz
+All GPU-intensive C++ nodes are loaded into a single `component_container_mt` (multi-threaded composable container) named `slam_container`. This avoids GPU context switching overhead.
 
-### Depth Filter Node (this package: `depth_filter_node`)
-- **Input**: `/zed/.../depth_registered` + `/zed/.../rgb/image_rect_color` (ApproximateTime sync, 10-msg buffer)
-- **Processing pipeline** (sequential, each stage optional via YAML):
-  1. **PassThrough**: NaN removal + range clamp [0.3m, 10.0m] → sets invalid pixels to NaN
-  2. **Temporal averaging**: Running average over N frames (default 3 = ~100ms) with per-pixel NaN-aware accumulation
-  3. **Bilateral filter**: Edge-preserving smoothing (kernel=5, sigma=50) — NaN handled via temporary zero-fill
-  4. **Hole filling**: Morphological closing + Telea inpainting for small gaps (disabled by default)
-- **Output**: `/filtered/rgb`, `/filtered/depth`, `/filtered/camera_info` (camera_info is passthrough)
-- **Executor**: `MultiThreadedExecutor` with 2 threads
-- **Diagnostics**: Logs frame count, processing time, and invalid pixel percentage every 100 frames
+Nodes loaded via `LoadComposableNodes`:
+- ZED camera node
+- cuVSLAM visual SLAM node
+- nvblox mapping node
 
-### cuVSLAM (external: `isaac_ros_visual_slam`)
-- **Input**: Rectified stereo grayscale + IMU (via topic remapping)
-- **Output**: `/visual_slam/tracking/odometry` (nav_msgs/Odometry) + TF `odom → base_link`
-- **Mode**: Pure VIO (`enable_localization_n_mapping: false`, `enable_landmarks: false`)
-- **Ground constraint**: Enabled — constrains odometry to 2D plane
-- **IMU noise model**: Tuned for ZED 2i's BMI085 sensor
-- Does NOT publish `map → odom` (RTAB-Map does that)
+### IPC Decision
 
-### RTAB-Map (external: `rtabmap_slam`)
-- **Input**: Filtered RGB-D + cuVSLAM odometry + IMU
-- **Critical setting**: `visual_odometry: false` — uses external odometry only
-- **Functions**:
-  - Pose graph construction (new node every 5cm / 6deg)
-  - Loop closure detection (threshold 0.09, spatial proximity for greenhouse rows)
-  - Graph optimization (GTSAM with gravity, robust Huber cost, 100 iterations)
-  - 2D occupancy grid generation (5cm cells)
-  - 3D point cloud assembly (2cm voxels)
-  - `map → odom` TF publication (corrects drift on loop closure)
-- **Modes**: Mapping (default, deletes DB on start) or Localization (loads existing DB, `Mem/IncrementalMemory: false`)
-- **3DoF constraint**: `Reg/Force3DoF: true` — only X, Y, Yaw (ground robot assumption)
+Intra-process communication (IPC) is **disabled**:
+- `enable_ipc=false` on the container
+- `use_intra_process_comms=False` on each `ComposableNode`
 
-### SLAM Monitor Node (this package: `slam_monitor_node`)
-- **Input**: `/filtered/rgb`, `/filtered/depth`, `/zed/.../imu/data`, `/visual_slam/tracking/odometry`
-- **Output**: `/slam/diagnostics` (diagnostic_msgs/DiagnosticArray at 1Hz)
-- **Monitors**:
-  - Topic rates via exponential moving average (RGB, Depth, IMU, Odom)
-  - TF chain integrity (`map → base_link` lookup)
-  - Total odometry distance traveled
-- **Health thresholds**: RGB/Depth/Odom < 10Hz = WARN, IMU < 100Hz = WARN
-- **Console log**: Summary every 10 seconds
+**Rationale:** Enabling IPC with the current cuVSLAM + nvblox combination causes intermittent crashes in the composable container due to shared pointer lifetime issues across the GPU pipeline. CycloneDDS zero-copy transport provides sufficient performance for the image topics at 15fps HD1080. The latency penalty (~2ms per topic hop) is acceptable.
+
+### Standalone Nodes
+
+The following run as separate processes outside the composable container:
+- `depth_filter_node` -- standalone lifecycle node
+- `slam_monitor_node` -- standalone node
+- `pipeline_watchdog_node` -- standalone node
+- `coverage_monitor.py` -- Python node
+- `session_recorder.py` -- Python node
+
+## Node Descriptions
+
+### ZED Camera Node (composable)
+
+Publishes stereo images, depth, and IMU data from the ZED 2i camera.
+
+- Resolution: HD1080 (1920x1080)
+- `grab_frame_rate`: 30 (SDK parameter; actual output is 15fps at 1080p due to hardware limits)
+- Depth mode: PERFORMANCE
+- IMU rate: 400Hz (BMI085 sensor)
+- `publish_tf`: false (cuVSLAM handles the TF tree)
+
+### cuVSLAM Node (composable)
+
+NVIDIA CUDA Visual SLAM providing stereo visual-inertial odometry.
+
+- Mode: Stereo VIO with IMU fusion (BMI085)
+- Ground constraint enabled
+- `image_jitter_threshold_ms`: 70 (calibrated for 15fps jitter)
+- Pure VIO mode -- no internal loop closure or SLAM map. This node provides odometry only.
+- Publishes: `/visual_slam/tracking/odometry`, TF `odom -> base_link`
+
+### nvblox Node (composable)
+
+Voxel-based 3D reconstruction replacing the former RTAB-Map pipeline.
+
+- Consumes filtered depth from `depth_filter_node`
+- Publishes mesh and 2D map slice for navigation
+- Topics: `/nvblox_node/mesh`, `/nvblox_node/map_slice`
+
+### depth_filter_node (standalone)
+
+Four-stage depth image filter optimized for single-pass execution at ~40ms per frame on HD1080.
+
+Pipeline stages:
+1. Range clamp
+2. Temporal smoothing
+3. Bilateral filter
+4. Hole filling
+
+Publishes:
+- `/depth_filter/filtered` (sensor_msgs/Image)
+- `/depth_filter/latency` (std_msgs/Float32) -- per-frame processing time in ms
+- `/depth_filter/quality` (std_msgs/String) -- JSON with per-stage metrics
+
+### slam_monitor_node (standalone)
+
+Comprehensive diagnostics node with 7 monitoring groups:
+
+| Group | What it monitors |
+|-------|-----------------|
+| Sensors | Camera frame rates, IMU rates, image topic health |
+| TF | Transform freshness, TF age threshold (150ms) |
+| Jetson | GPU/CPU temps, power, clocks via tegrastats pipe thread |
+| Latency | End-to-end pipeline latency, depth filter latency |
+| DataQuality | Depth image statistics, NaN percentage, coverage |
+| DiskIO | Disk usage via `statvfs`, I/O throughput via `/proc/diskstats` |
+| Pipeline | Node liveness, topic publication rates, restart counts |
+
+Publishes `/slam/quality` as a `std_msgs/String` containing a ~50-field JSON document.
+
+Tegrastats data is read via a persistent pipe thread (not a subprocess per sample). Disk monitoring uses `statvfs()` for free space and parses `/proc/diskstats` for I/O counters.
+
+### pipeline_watchdog_node (standalone)
+
+Monitors critical nodes and performs crash recovery (restart via launch actions). Publishes `/watchdog/heartbeat` at 1Hz.
+
+### coverage_monitor.py (standalone, Python)
+
+Tracks spatial coverage of the SLAM session using camera FOV projection.
+
+- Message types: `std_msgs/String` (JSON) -- does NOT use `agv_greenhouse_msgs`
+- Publishes: `/coverage/grid`, `/coverage/status`
+
+### session_recorder.py (standalone, Python)
+
+Manages recording sessions (rosbag, SVO2 files, TUM-format trajectories).
+
+- Services: `/session/start_recording`, `/session/stop_recording` (both `std_srvs/Trigger`)
+- Publisher: `/session/info` (`std_msgs/String` JSON)
+- Does NOT use `agv_greenhouse_msgs`
+
+## Topic List
+
+| Topic | Type | Hz | Producer |
+|-------|------|-----|----------|
+| `/zed/left/image_rect_color` | sensor_msgs/Image | 15 | ZED node |
+| `/zed/right/image_rect_color` | sensor_msgs/Image | 15 | ZED node |
+| `/zed/depth/depth_registered` | sensor_msgs/Image | 15 | ZED node |
+| `/zed/imu/data` | sensor_msgs/Imu | 400 | ZED node |
+| `/visual_slam/tracking/odometry` | nav_msgs/Odometry | 15 | cuVSLAM |
+| `/tf` | tf2_msgs/TFMessage | 15 | cuVSLAM |
+| `/depth_filter/filtered` | sensor_msgs/Image | 15 | depth_filter_node |
+| `/depth_filter/latency` | std_msgs/Float32 | 15 | depth_filter_node |
+| `/depth_filter/quality` | std_msgs/String | 15 | depth_filter_node |
+| `/nvblox_node/mesh` | nvblox_msgs/Mesh | ~2 | nvblox |
+| `/nvblox_node/map_slice` | nvblox_msgs/DistanceMapSlice | ~2 | nvblox |
+| `/slam/quality` | std_msgs/String | 1 | slam_monitor_node |
+| `/watchdog/heartbeat` | std_msgs/String | 1 | pipeline_watchdog_node |
+| `/coverage/grid` | std_msgs/String | ~1 | coverage_monitor.py |
+| `/coverage/status` | std_msgs/String | ~1 | coverage_monitor.py |
+| `/session/info` | std_msgs/String | ~0.2 | session_recorder.py |
 
 ## TF Tree
 
 ```
-map                          ← RTAB-Map publishes (loop closure correction)
-  └── odom                   ← cuVSLAM publishes (real-time VIO)
-        └── base_link        ← Static TF from launch file
-              └── zed2i_base_link  ← Static TF from launch file
-                    ├── zed2i_left_camera_optical_frame    ← ZED wrapper
-                    ├── zed2i_right_camera_optical_frame   ← ZED wrapper
-                    └── zed2i_imu_link                     ← ZED wrapper
+odom (cuVSLAM)
+  +--- base_link (cuVSLAM publishes this transform)
+         +--- zed_camera_link (static TF from launch)
+                +--- zed_left_camera_frame (static, from URDF/static_tf)
+                +--- zed_right_camera_frame (static, from URDF/static_tf)
+                +--- zed_imu_link (static, from URDF/static_tf)
 ```
 
-**Static transform** (`base_link → zed2i_base_link`):
-- Translation: x=0.1m (forward), y=0.0m, z=0.3m (up)
-- Rotation: roll=0, pitch=0.087 rad (~5deg down), yaw=0
-- Defined in both `launch/agv_slam.launch.py` and `urdf/zed2i_mount.urdf.xacro`
+cuVSLAM publishes the dynamic `odom -> base_link` transform. The ZED node has `publish_tf: false` to avoid conflicting transforms. All camera-to-base transforms are published as static TFs from the launch file.
 
-## Launch Sequence & Timing
+## Platform
 
-Nodes launch with `TimerAction` delays to ensure each dependency is publishing before its consumer starts:
-
-| Delay | Node | Waits for |
-|-------|------|-----------|
-| 0s | ZED 2i + Static TF | - |
-| 3s | Depth Filter | ZED publishing RGB + Depth |
-| 5s | cuVSLAM | ZED publishing Stereo + IMU |
-| 8s | RTAB-Map | cuVSLAM publishing odometry + Depth Filter publishing filtered images |
-| 10s | SLAM Monitor | All upstream nodes |
-
-## QoS Policies
-
-| Topic type | QoS | Rationale |
-|-----------|-----|-----------|
-| Sensor images/depth/IMU | `SensorDataQoS` (best effort, volatile) | Drop old frames, never block |
-| Odometry | `SensorDataQoS` | Real-time, tolerate drops |
-| Diagnostics | Reliable, queue=10 | Must not lose health alerts |
-| RTAB-Map grid/cloud | Reliable, depth=5 | Maps must arrive intact |
-| Message filter sync | ApproximateTime, buffer=10 | Tolerate slight timestamp mismatch |
-
-## DDS Configuration (CycloneDDS)
-
-- **Transport**: Localhost only (`lo` interface) — all nodes on same Jetson
-- **Shared memory**: Enabled — zero-copy for images/point clouds between nodes
-- **Receive buffers**: 10MB minimum (images are ~1.8MB each at HD720)
-- **Write high-watermark**: 500KB
-- **Discovery**: 30s lease duration (reduce overhead, all nodes are local)
-
-## Memory & Compute Budget (Orin AGX 64GB)
-
-| Resource | Consumer | Typical |
-|----------|----------|---------|
-| GPU | cuVSLAM VIO | ~1.7% |
-| GPU | ZED NEURAL depth | ~15-20% |
-| CPU | RTAB-Map graph optimization | ~5-10% (1 core) |
-| CPU | Depth Filter (OpenCV) | ~3% (2 threads) |
-| CPU | ZED driver | ~5% |
-| RAM | RTAB-Map working memory | 2-8 GB (grows with map) |
-| RAM | Image buffers (DDS) | ~500 MB |
-| RAM | Available headroom | 40-55 GB |
-
-RTAB-Map memory is unlimited (`Rtabmap/MemoryThr: 0`) to exploit the 64GB available.
-
-## Greenhouse-Specific Tuning
-
-The greenhouse environment has specific challenges addressed in the config:
-
-1. **Repetitive visual scenes** (identical plant rows):
-   - `RGBD/ProximityBySpace: true` — detect loop closures by spatial proximity, not just visual similarity
-   - `Mem/RehearsalSimilarity: 0.6` — higher threshold to avoid merging distinct-but-similar nodes
-   - `Vis/FeatureType: 8` (GFTT+ORB) — uniform feature distribution across image, prevents clustering on high-texture plants
-
-2. **Slow robot movement**:
-   - `RGBD/LinearUpdate: 0.05m` — create map node every 5cm (default 0.1m was too sparse)
-   - `RGBD/AngularUpdate: 0.1 rad` — create node every ~6deg turn
-
-3. **Reflective/transparent surfaces** (glass walls, wet leaves):
-   - `depth_confidence: 50` — aggressive filtering in ZED config
-   - `depth_texture_conf: 100` — remove flat/uniform depth regions
-   - `remove_saturated_areas: true` — remove blown-out reflections
-
-4. **Long corridor-like rows**:
-   - `RGBD/LocalRadius: 5.0m` — expanded local search radius
-   - `RGBD/ProximityMaxGraphDepth: 50` — search deeper in graph for spatial matches
+- Hardware: Jetson Orin AGX 64GB
+- JetPack / L4T: R36.4.7
+- ROS2: Humble
+- DDS: CycloneDDS
+- CUDA: via JetPack (used by cuVSLAM, nvblox, depth_filter_node)

@@ -1,11 +1,13 @@
 # Source Code — Custom ROS2 Nodes
 
-This package provides two C++ ROS2 nodes. All code lives in the `agv_slam` namespace.
+This package provides three C++ ROS2 nodes plus two Python scripts. All C++ code is in namespace `agv_slam`.
 
 ## Build
 
 ```bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
+cd ~/ros2_ws
+colcon build --symlink-install --packages-select agv_slam \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
 
 Compiler flags: `-Wall -Wextra -Wpedantic -O3`
@@ -14,82 +16,123 @@ Compiler flags: `-Wall -Wextra -Wpedantic -O3`
 
 **Files**: `src/depth_filter_node.cpp`, `include/agv_slam/depth_filter_node.hpp`
 
-**Purpose**: Preprocesses ZED depth images before they reach RTAB-Map. Runs a 4-stage pipeline to remove noise, fill holes, and smooth edges.
+Preprocesses ZED depth images before they reach nvblox. Runs a 4-stage pipeline to remove noise, fill holes, and smooth edges.
 
 ### Class: `DepthFilterNode` (inherits `rclcpp::Node`)
 
-**Constructor** (`depth_filter_node.cpp:8`):
+**Constructor**:
 - Declares and reads 14 parameters from `config/depth_filter.yaml`
 - Sets up `message_filters::ApproximateTime` synchronizer for RGB + Depth (buffer=10)
-- Creates publishers on `/filtered/depth`, `/filtered/rgb`, `/filtered/camera_info`
-- Camera info is a direct passthrough from ZED
+- Creates publishers: `/filtered/depth`, `/filtered/rgb`, `/filtered/camera_info`
+- Creates monitoring publishers: `/depth_filter/latency` (Float32), `/depth_filter/quality` (String JSON)
 
-**Callback** — `depth_callback()` (`depth_filter_node.cpp:73`):
+**Callback** — `depth_callback()`:
 - Converts depth to OpenCV `CV_32FC1` via `cv_bridge`
-- Runs 4 stages sequentially (each guarded by enable flag):
-  1. `apply_confidence_filter()` — sets out-of-range and NaN pixels to NaN
-  2. `apply_temporal_filter()` — running average over N frames in `std::deque` (mutex-protected)
-  3. `apply_bilateral_filter()` — `cv::bilateralFilter` with NaN→0 swap
-  4. `apply_hole_filling()` — morphological closing + `cv::inpaint(TELEA)`
-- Publishes filtered depth + passes through RGB with matching timestamp
+- **Stage 1 (optimized single-pass)**: Range filter + NaN removal + valid pixel count + mean depth — all in one loop iteration over every pixel
+- Stage 2: `apply_temporal_filter()` — running average over N frames in `std::deque` (mutex-protected)
+- Stage 3: `apply_bilateral_filter()` — `cv::bilateralFilter` with NaN→0 swap
+- Stage 4: `apply_hole_filling()` — morphological closing + `cv::inpaint(TELEA)`
+- Publishes filtered depth + passes through RGB
+- Publishes latency (Float32 ms) and quality JSON (valid_ratio, mean_depth, latency_ms)
 - Logs stats every 100 frames
 
-**Processing methods**:
+**Performance**: ~40ms per frame at HD1080 (single-pass optimization reduced from 54ms)
 
-| Method | Line | Key logic |
-|--------|------|-----------|
-| `apply_confidence_filter()` | :138 | NaN mask via `depth != depth`, range mask via threshold, combined → set to NaN |
-| `apply_temporal_filter()` | :159 | Deque of N frames, NaN-aware accumulation, divide by valid count per pixel |
-| `apply_bilateral_filter()` | :203 | Temp-replace NaN with 0, bilateral, restore NaN positions |
-| `apply_hole_filling()` | :218 | Morph close to find fillable pixels, normalize to 8-bit, Telea inpaint, denormalize |
-
-**Executor**: `MultiThreadedExecutor` with 2 threads (`depth_filter_node.cpp:271`)
-
-**Member variables** (all with trailing `_` underscore):
-- `temporal_buffer_` — `std::deque<cv::Mat>`, protected by `buffer_mutex_`
-- `frames_processed_`, `points_removed_` — running counters for diagnostics
+**Executor**: `MultiThreadedExecutor` with 2 threads
 
 ### Dependencies
 ```
-rclcpp, sensor_msgs, image_transport, cv_bridge, message_filters, OpenCV
+rclcpp, sensor_msgs, std_msgs, image_transport, cv_bridge, message_filters, OpenCV
 ```
 
 ## slam_monitor_node
 
 **Files**: `src/slam_monitor_node.cpp`, `include/agv_slam/slam_monitor_node.hpp`
 
-**Purpose**: Publishes 1Hz diagnostics with sensor rates, TF health, and odometry distance.
+Comprehensive production monitoring with 7 diagnostic groups, tegrastats integration, and disk I/O tracking.
 
 ### Class: `SlamMonitorNode` (inherits `rclcpp::Node`)
 
-**Constructor** (`slam_monitor_node.cpp:7`):
-- Subscribes to 4 topics: `/filtered/rgb`, `/filtered/depth`, `/zed/.../imu/data`, `/visual_slam/.../odometry`
-- Creates diagnostics publisher on `/slam/diagnostics` (queue=10)
-- Creates 1-second wall timer for `publish_diagnostics()`
-- Initializes TF2 buffer + listener for `map → base_link` lookup
+**Subscriptions** (8 topics):
+- `/filtered/rgb`, `/filtered/depth` — filtered camera rates
+- `/zed/zed_node/left/image_rect_gray`, `/zed/zed_node/depth/depth_registered` — raw ZED rates
+- `/zed/zed_node/imu/data` — IMU rate
+- `/visual_slam/tracking/odometry` — cuVSLAM odom rate + distance tracking
+- `/depth_filter/latency` — depth filter timing
+- `/depth_filter/quality` — depth valid ratio, mean depth
 
-**Rate tracking** — `RateTracker` struct (`slam_monitor_node.hpp:44`):
-- Lightweight inline struct with `tick()` and `get_hz()` methods
-- Uses exponential moving average: `hz = 0.9 * hz + 0.1 * (1.0 / dt)`
-- Mutex-protected for thread safety
-- Four instances: `rgb_rate_`, `depth_rate_`, `imu_rate_`, `odom_rate_`
+**Rate tracking** — `rate_tracker.hpp`:
+- `RateTracker` struct with EMA-based `get_hz()` and frame drop detection
+- Drop detection: compares inter-frame dt against expected period, counts drops when dt > 1.5x expected
+- Per-tracker `expected_hz` (set to 0.0 to disable drop detection, e.g., for bursty IMU)
+- 8 rate trackers calibrated for HD1080@15fps baseline
 
-**Callbacks** (`slam_monitor_node.cpp:45-70`):
-- `rgb_callback()`, `depth_callback()`, `imu_callback()` — call `rate_.tick()` only
-- `odom_callback()` — ticks rate + accumulates Euclidean distance from odometry positions
+**Tegrastats** — background thread:
+- Opens pipe to `tegrastats --interval 2000`
+- Parses: GPU%, per-core CPU%, RAM, SWAP, Tj temperature, power
+- Stores in `TegraData` struct with mutex
 
-**Diagnostics** — `publish_diagnostics()` (`slam_monitor_node.cpp:72`):
-- Publishes `DiagnosticArray` with two status entries:
-  1. **SLAM/Sensors**: Hz for all 4 topics + total distance. Level = WARN if any below threshold (RGB/Depth/Odom < 10Hz, IMU < 100Hz)
-  2. **SLAM/TF**: `map → base_link` transform lookup. Level = ERROR if broken, includes x/y position when OK
-- Console summary log every 10 seconds
+**Disk I/O** — `DiskStats`:
+- Reads `statvfs()` for free space
+- Reads `/proc/diskstats` for read/write MB/s
+- Estimates recording time remaining
+
+**Data Quality** — `DataQuality` struct:
+- cuVSLAM tracking confidence and vo_state
+- Depth valid ratio and mean depth (from depth_filter/quality)
+- cuVSLAM latency
+
+### 7 Diagnostic Groups
+
+Published on `/slam/diagnostics` (DiagnosticArray) at 1 Hz:
+
+| Group | Content |
+|-------|---------|
+| SLAM/Sensors | 8 rate trackers + frame drop % |
+| SLAM/TF | odom→base_link age, base_link→camera existence |
+| SLAM/Jetson | GPU%, CPU%, thermal, RAM, SWAP, power, per-core |
+| SLAM/Latency | depth_filter ms, cuVSLAM ms |
+| SLAM/DataQuality | tracking confidence, vo_state, depth valid ratio |
+| SLAM/DiskIO | free GB, write MB/s, estimated minutes remaining |
+| SLAM/Pipeline | aggregated overall health status |
+
+### JSON Output
+
+Published on `/slam/quality` (String) at 1 Hz with ~50 fields covering all metrics.
+
+### Threshold Configuration
+
+Three-tier alerting: OK (green) → WARN (yellow) → ERROR (red)
+
+| Metric | OK | WARN | ERROR |
+|--------|-----|------|-------|
+| Camera rates | >=15 Hz | <13 Hz | <10 Hz |
+| IMU rate | >=400 Hz | <360 Hz | <200 Hz |
+| Depth filter latency | <30 ms | >30 ms | >60 ms |
+| Frame drops | <3% | >3% | >10% |
+| TF age | <150 ms | - | >150 ms |
+| GPU util | <80% | >80% | >90% |
+| Tj temp | <80C | >80C | >90C |
+| RAM | <48 GB | >48 GB | >56 GB |
+| Disk free | >20 GB | <20 GB | <5 GB |
 
 **Executor**: Default single-threaded (`rclcpp::spin`)
 
 ### Dependencies
 ```
-rclcpp, sensor_msgs, std_msgs, diagnostic_msgs, nav_msgs, tf2_ros
+rclcpp, sensor_msgs, std_msgs, diagnostic_msgs, nav_msgs, geometry_msgs,
+visualization_msgs, tf2_ros, OpenCV
 ```
+
+## pipeline_watchdog_node
+
+**Files**: `src/pipeline_watchdog_node.cpp`, `include/agv_slam/pipeline_watchdog_node.hpp`
+
+Monitors pipeline health, detects node crashes, and triggers recovery.
+
+- Publishes `/watchdog/heartbeat` (Int32) at 1 Hz
+- Logs events to `/mnt/ssd/slam_logs/`
+- Crash detection with configurable recovery actions
 
 ## Code Style
 
@@ -101,7 +144,7 @@ rclcpp, sensor_msgs, std_msgs, diagnostic_msgs, nav_msgs, tf2_ros
 - **Include order**: own header → STL → ROS → OpenCV
 - **Section comments**: `// ── Section Name ──`
 - **Indentation**: 2 spaces
-- **Error handling**: `RCLCPP_ERROR_THROTTLE` for recoverable errors, exception catch for cv_bridge
+- **Error handling**: `RCLCPP_ERROR_THROTTLE` for recoverable, try-catch for time source mismatches
 
 ## Adding a New Node
 
@@ -114,7 +157,6 @@ rclcpp, sensor_msgs, std_msgs, diagnostic_msgs, nav_msgs, tf2_ros
      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
      $<INSTALL_INTERFACE:include>)
    ament_target_dependencies(new_node rclcpp ...)
+   install(TARGETS new_node DESTINATION lib/${PROJECT_NAME})
    ```
-4. Add to `install(TARGETS ...)` block in `CMakeLists.txt`
-5. Add to launch file with appropriate `TimerAction` delay
-6. Add config YAML if needed + install in `CMakeLists.txt` `install(DIRECTORY ...)`
+4. Add to launch file with appropriate `TimerAction` delay

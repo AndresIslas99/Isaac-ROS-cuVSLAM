@@ -1,111 +1,97 @@
-# Greenhouse Recording Guide
+# Recording Guide
 
-Best practices for capturing high-quality data for 3DGS reconstruction.
+## Session Recorder
 
-## Before Recording
+The `session_recorder.py` node provides bag recording, SVO2 recording, and TUM trajectory logging.
 
-1. Run the setup script (once per boot):
-   ```bash
-   sudo bash scripts/jetson_setup.sh
-   ```
+### Starting a Recording
 
-2. Check storage:
-   ```bash
-   python3 scripts/check_storage.py
-   ```
-   Ensure at least 50 GB free for a 15-minute session.
-
-3. Launch the pipeline:
-   ```bash
-   ros2 launch agv_slam agv_slam.launch.py
-   ```
-
-4. Verify all sensors are online:
-   ```bash
-   bash scripts/validate_slam.sh 10
-   ```
-
-## Recording a Session
-
-### Start recording:
 ```bash
-ros2 service call /session/start_recording agv_greenhouse_msgs/srv/StartRecording "{session_name: 'greenhouse_row_A'}"
+ros2 service call /session/start_recording std_srvs/srv/Trigger
 ```
 
-### Stop recording:
+This creates a session directory at `/mnt/ssd/sessions/session_YYYYMMDD_HHMMSS/` containing:
+- `bag/` — ROS2 bag with configured topics
+- `trajectory.tum` — TUM-format trajectory (timestamp tx ty tz qx qy qz qw)
+- `*.svo2` — ZED SVO2 raw recording (H265, if ZED SVO service available)
+- `manifest.yaml` — Session metadata
+
+### Stopping a Recording
+
 ```bash
-ros2 service call /session/stop_recording agv_greenhouse_msgs/srv/StopRecording "{}"
+ros2 service call /session/stop_recording std_srvs/srv/Trigger
 ```
 
-### Monitor during recording:
-- Check `/session/info` for frame count and disk usage
-- Watch the coverage grid in RViz or Foxglove
-- The coverage monitor shows which areas still need scanning
+### Monitoring Recording Status
 
-## Optimal Capture Parameters
-
-| Parameter | Value | Why |
-|-----------|-------|-----|
-| Robot speed | < 0.3 m/s | Prevents motion blur at 30fps |
-| Overlap between passes | > 60% | Required for 3DGS quality |
-| Session duration | 15-30 min | Balance coverage vs file size |
-| Camera height | 0.3-1.5m | Varies with elevator position |
-
-## Scanning Pattern
-
-For best coverage, use a **serpentine pattern** through greenhouse rows:
-
-```
-Row 1: =========>
-                 |
-Row 2: <=========
-|
-Row 3: =========>
-                 |
-Row 4: <=========
+```bash
+ros2 topic echo /session/info
 ```
 
-### Key tips:
-- **Move slowly at row ends** — turns need extra overlap
-- **Pause briefly** at interesting structures (plants, equipment)
-- **Cover each area from 2+ angles** when possible (forward + return pass)
-- **Avoid sudden movements** — cuVSLAM tracks better with smooth motion
+Returns JSON:
+```json
+{
+  "session_id": "session_20260203_231200",
+  "session_path": "/mnt/ssd/sessions/session_20260203_231200",
+  "recording_active": true,
+  "frame_count": 450,
+  "duration_seconds": 30.0,
+  "disk_usage_gb": 1.2,
+  "disk_free_gb": 834.5,
+  "status_message": "Recording"
+}
+```
 
-## Lighting Conditions
+### Storage
 
-| Condition | Impact | Mitigation |
-|-----------|--------|------------|
-| Direct sunlight through glass | Overexposure, depth artifacts | Use auto-exposure, avoid midday |
-| Shadows from structures | Depth holes in shadows | Multiple passes from different angles |
-| Artificial grow lights | Color cast on images | Auto white balance handles this |
-| Very low light | Noisy depth, tracking loss | Minimum 50 lux recommended |
+- Output directory: `/mnt/ssd/sessions/` (configured via `output_dir` parameter)
+- Disk space warning at 10 GB free (configurable via `disk_warning_gb`)
+- The slam_monitor also tracks disk free space in the SLAM/DiskIO diagnostic group
 
-## After Recording
+## Coverage Monitoring
 
-1. **Validate the session**:
-   ```bash
-   bash scripts/export_session.sh /mnt/ssd/sessions/your_session
-   ```
+The `coverage_monitor.py` node tracks which areas have been observed by the camera using FOV projection onto a 2D grid.
 
-2. **Transfer to RTX laptop** (follow the instructions printed by export script)
+### Coverage Grid
 
-3. **Review coverage** — replay the bag through nvblox:
-   ```bash
-   ros2 launch agv_slam playback.launch.py bag_path:=/mnt/ssd/sessions/your_session/bag
-   ```
+- Published on `/coverage/grid` (OccupancyGrid) at 0.5 Hz
+- 500x500 grid at 0.1m resolution (50m x 50m area)
+- Cell states: -1 (unknown), 50 (seen once), 100 (well covered)
 
-## Data Sizes (approximate at HD1080 30fps)
+### Coverage Status
 
-| Component | Rate | 15 min session |
-|-----------|------|----------------|
-| ROS2 bag (all topics) | ~2.5 GB/min | ~37 GB |
-| SVO2 (H265) | ~0.8 GB/min | ~12 GB |
-| TUM trajectory | negligible | < 1 MB |
-| Total | ~3.3 GB/min | ~50 GB |
+Published on `/coverage/status` (String JSON) at 1 Hz:
+```json
+{
+  "total_cells": 250000,
+  "seen_cells": 15000,
+  "well_covered_cells": 8000,
+  "coverage_percent": 6.0,
+  "well_covered_percent": 3.2,
+  "mapped_area_m2": 150.0,
+  "grid_resolution": 0.1
+}
+```
 
-## Troubleshooting
+### Multi-Angle Coverage
 
-- **"LOW DISK SPACE" warning**: Stop recording, export/archive old sessions
-- **Coverage grid not updating**: Check cuVSLAM odometry is running (`/visual_slam/tracking/odometry`)
-- **Recording won't start**: Check if a previous recording is still active
-- **SVO2 not saving**: Verify ZED node services: `ros2 service list | grep svo`
+A cell is upgraded from "seen once" to "well covered" when observed from a yaw angle differing by more than 30 degrees from the first observation. This ensures multiple viewing angles for greenhouse row inspection.
+
+### Resetting Coverage
+
+```bash
+ros2 service call /coverage/reset std_srvs/srv/Trigger
+```
+
+## Foxglove Visualization
+
+Connect Foxglove Studio to `ws://192.168.55.1:8765` (or the Jetson's IP on your network).
+
+Key panels to configure:
+- 3D View: TF tree, mesh markers, point clouds
+- Image: `/filtered/rgb`, `/filtered/depth`
+- Diagnostics: `/slam/diagnostics`
+- Plot: `/depth_filter/latency`, rates from `/slam/quality`
+- Raw Messages: `/slam/quality` for full JSON
+
+The Foxglove bridge topic whitelist is configured in the launch file to include all relevant topics.

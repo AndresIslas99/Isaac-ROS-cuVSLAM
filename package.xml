@@ -34,7 +34,6 @@
   <!-- SLAM + Mapping -->
   <exec_depend>isaac_ros_visual_slam</exec_depend>
   <exec_depend>nvblox_ros</exec_depend>
-  <depend>agv_greenhouse_msgs</depend>
 
   <!-- DDS -->
   <exec_depend>rmw_cyclonedds_cpp</exec_depend>

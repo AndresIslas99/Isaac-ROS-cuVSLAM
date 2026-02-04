@@ -1,57 +1,77 @@
-# Camera Mount Calibration
+# Camera Calibration and Mount Configuration
 
-How to measure and set the camera-to-robot transform.
+## Camera Mount TF
 
-## What You Need
+The static transform `base_link -> zed_camera_link` is published by a `static_transform_publisher` node in the launch file.
 
-- Tape measure or ruler
-- The launch arguments: `camera_x`, `camera_y`, `camera_z`, `camera_pitch`
+### Current Values
 
-## Measurement Reference
-
-All measurements are from `base_link` (center of the robot at ground level):
-
-- **X** = forward distance (positive = camera in front of robot center)
-- **Y** = left distance (positive = camera left of center, typically 0)
-- **Z** = height above ground
-- **Pitch** = downward tilt in radians (positive = tilted down)
-
-## Steps
-
-1. **Measure X**: Distance from robot center to camera, along the forward direction.
-   Default: 0.1m (10cm forward)
-
-2. **Measure Y**: Lateral offset. Should be 0 if camera is centered.
-   Default: 0.0m
-
-3. **Measure Z**: Height from ground to the center of the ZED 2i lens.
-   Default: 0.3m (30cm)
-
-4. **Estimate pitch**: If the camera points slightly downward, measure the angle.
-   5 degrees ≈ 0.087 radians. Use `pitch_rad = degrees * 3.14159 / 180`
-   Default: 0.087 (5° down)
-
-## Setting Values
-
-```bash
-# Via launch arguments (no rebuild needed):
-ros2 launch agv_slam agv_slam.launch.py camera_x:=0.15 camera_z:=0.45 camera_pitch:=0.12
-
-# Or edit the defaults in the launch file
+```
+x: 0.1 m    (forward from base_link)
+y: 0.0 m    (centered)
+z: 0.3 m    (above base_link)
+roll: 0.0
+pitch: 0.087 rad  (~5 degrees downward)
+yaw: 0.0
 ```
 
-## Verification
+### Launch Arguments
 
-After launching, verify with:
+These can be overridden at launch time:
+
+```bash
+ros2 launch agv_slam agv_slam.launch.py \
+  camera_x:=0.1 camera_y:=0.0 camera_z:=0.3 camera_pitch:=0.087
+```
+
+### Measuring the Transform
+
+1. Measure the physical offset from robot center (base_link) to the camera mounting point
+2. X = forward distance in meters
+3. Y = leftward distance in meters (0 if centered)
+4. Z = upward distance in meters
+5. Pitch = downward angle in radians (positive = looking down). Use `python3 -c "import math; print(math.radians(5))"`
+
+### Verification
+
+After launch, verify the TF:
 
 ```bash
 ros2 run tf2_ros tf2_echo base_link zed_camera_link
 ```
 
-The output should show your configured translation and rotation values.
+The slam_monitor will report `base_link->camera: OK` in the SLAM/TF diagnostic group if this transform exists.
 
-## Tips
+## IMU Noise Parameters
 
-- Small errors in X/Y/Z (< 2cm) are acceptable — cuVSLAM adapts
-- Pitch accuracy matters more for nvblox ground plane alignment
-- Re-measure if the camera mount or elevator position changes
+cuVSLAM uses the ZED 2i's built-in BMI085 IMU. The noise parameters in `config/cuvslam.yaml` are from the BMI085 datasheet:
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| `gyro_noise_density` | 0.000244 | BMI085: 0.014 deg/s/sqrt(Hz) |
+| `gyro_random_walk` | 0.000019393 | BMI085 typical |
+| `accel_noise_density` | 0.001862 | BMI085: 120 ug/sqrt(Hz) |
+| `accel_random_walk` | 0.003 | BMI085 typical |
+| `calibration_frequency` | 200.0 | IMU rate / 2 |
+
+These should not need adjustment unless replacing the camera.
+
+## ZED 2i Depth Confidence
+
+The ZED depth confidence parameters in `config/zed2i.yaml` control how aggressively noisy depth pixels are rejected:
+
+| Parameter | Value | Effect |
+|-----------|-------|--------|
+| `confidence_threshold` | 50 | Balance between coverage and noise (0=all, 100=none) |
+| `texture_confidence_threshold` | 100 | Strictest: removes flat/textureless surfaces |
+
+For greenhouse environments with glass and reflective surfaces, keeping `confidence_threshold` at 50 provides a good balance. The depth_filter_node further removes ~33% of remaining invalid pixels.
+
+## Frame Rate Consideration
+
+The ZED 2i at HD1080 resolution achieves a maximum of **15 fps** (not 30fps as configured). The `grab_frame_rate: 30` in `zed2i.yaml` requests 30fps but the SDK caps at 15fps for 1080p. All monitoring thresholds are calibrated for this 15fps baseline.
+
+If higher frame rates are needed for faster robot motion:
+- Change `grab_resolution: 'HD720'` for 30fps at 1280x720
+- Update slam_monitor thresholds back to 30Hz
+- Update cuVSLAM `image_jitter_threshold_ms` to 40.0

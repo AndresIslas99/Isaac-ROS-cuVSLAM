@@ -1,189 +1,332 @@
-# Troubleshooting Guide
+# Troubleshooting Guide -- Jetson SLAM Pipeline v3.0.0
 
-## Quick Diagnostics
+## 1. slam_container Crashes (IPC-related)
+
+**Symptom:** The composable container `slam_container` segfaults or exits unexpectedly shortly after startup, often with errors referencing shared pointer use-after-free or intra-process manager.
+
+**Cause:** Intra-process communication (IPC) enabled on the composable container. cuVSLAM and nvblox have incompatible shared pointer lifetime expectations when sharing GPU buffers via IPC.
+
+**Fix:**
+- Ensure `enable_ipc=false` is set on the `ComposableNodeContainer`.
+- Ensure every `ComposableNode` has `extra_arguments=[{'use_intra_process_comms': False}]`.
+- Do NOT set `use_intra_process_comms: True` in any config file.
+
+**Verification:**
+```bash
+ros2 param get /slam_container use_intra_process_comms
+# Should return: Boolean value is: False
+```
+
+---
+
+## 2. cuVSLAM Frame Delta Warnings
+
+**Symptom:** Repeated warnings in the log:
+```
+[visual_slam_node] Frame delta exceeds threshold: XXms > 70ms
+```
+
+**Cause:** The ZED 2i at HD1080 delivers frames at approximately 15fps (66.7ms interval). Network jitter, USB contention, or Jetson thermal throttling can push inter-frame intervals beyond the configured `image_jitter_threshold_ms` of 70ms.
+
+**Diagnosis:**
+```bash
+# Check actual frame rate
+ros2 topic hz /zed/left/image_rect_color
+# Should show ~15 Hz. If significantly lower, investigate thermal or USB issues.
+
+# Check Jetson thermal state
+cat /sys/devices/virtual/thermal/thermal_zone*/temp
+```
+
+**Fix:**
+- If occasional (1-2 per minute), this is normal at 15fps. The 70ms threshold allows ~4ms of jitter.
+- If frequent, check for thermal throttling: `sudo jetson_clocks` or improve cooling.
+- If persistent, increase `image_jitter_threshold_ms` to 80-85ms (not recommended for production).
+- Check that no other USB3 devices are competing for bandwidth.
+
+---
+
+## 3. tegrastats Not Available
+
+**Symptom:** `slam_monitor_node` logs:
+```
+[slam_monitor_node] Failed to open tegrastats pipe
+[slam_monitor_node] Jetson diagnostics group disabled
+```
+
+The Jetson monitoring group in `/slam/quality` shows null values for GPU temp, power, and clock fields.
+
+**Cause:** The `tegrastats` binary requires root privileges or the user is not in the correct group.
+
+**Fix:**
+```bash
+# Option 1: Run with sudo (not recommended for production)
+sudo tegrastats --interval 1000
+
+# Option 2: Add user to the appropriate group
+sudo usermod -aG gpio $USER
+# Log out and back in
+
+# Option 3: Set capabilities on the binary
+sudo setcap cap_sys_admin+ep $(which tegrastats)
+```
+
+**Verification:**
+```bash
+tegrastats --interval 1000
+# Should output a line of stats every second
+```
+
+---
+
+## 4. CycloneDDS Buffer / Message Loss Issues
+
+**Symptom:** Topics drop messages, `ros2 topic hz` shows inconsistent rates, or subscribers report gaps in sequence numbers. May see DDS warnings about buffer overflow or "sample lost."
+
+**Cause:** Default CycloneDDS buffer sizes are insufficient for HD1080 image topics (~6MB per frame, stereo + depth = ~18MB at 15fps).
+
+**Fix:** Ensure the custom `cyclonedds.xml` is loaded and properly configured.
 
 ```bash
-# Check all nodes are running
-ros2 node list
-# Expected: /zed/zed_node, /depth_filter, /visual_slam, /rtabmap, /slam_monitor
+# Verify DDS config is loaded
+echo $CYCLONEDDS_URI
+# Should point to your cyclonedds.xml
 
-# Check topic rates
-ros2 topic hz /filtered/rgb           # Expected: ~30 Hz
-ros2 topic hz /filtered/depth         # Expected: ~30 Hz
-ros2 topic hz /zed/zed_node/imu/data  # Expected: ~400 Hz
-ros2 topic hz /visual_slam/tracking/odometry  # Expected: ~30 Hz
-
-# Check TF chain
-ros2 run tf2_ros tf2_echo map base_link
-
-# Read diagnostics
-ros2 topic echo /slam/diagnostics
-
-# Full validation
-bash scripts/validate_slam.sh 15
+# Check the config is active
+ros2 doctor --report | grep -i cyclone
 ```
 
-## Common Issues
+Key `cyclonedds.xml` parameters to verify:
+- `MaxMessageSize`: should be at least 65500 (UDP max)
+- `ReceiveBufferSize`: at least 33554432 (32MB)
+- `NetworkInterfaceAddress`: set to the correct interface (often `lo` for local-only)
+- `SharedMemory`: should be enabled for local communication
 
-### 1. "Only 1 map node" — RTAB-Map not building graph
-
-**Symptom**: RTAB-Map running but `/rtabmap/info` shows `map_size: 1` and no loop closures.
-
-**Root cause**: Default `RGBD/LinearUpdate: 0.1m` is too large for slow AGV movement — robot doesn't travel far enough between RTAB-Map detection cycles to trigger new node creation.
-
-**Fix** (already applied in `config/rtabmap.yaml`):
-```yaml
-RGBD/LinearUpdate: '0.05'    # 5cm instead of 10cm
-RGBD/AngularUpdate: '0.1'    # ~6deg instead of default
-Rtabmap/DetectionRate: '5.0'  # 5Hz processing rate
-```
-
-**Verify**: After fix, `/rtabmap/info` should show map_size increasing as the robot moves.
-
-### 2. cuVSLAM not publishing odometry
-
-**Symptom**: `/visual_slam/tracking/odometry` has no data.
-
-**Checks**:
-1. ZED stereo topics publishing: `ros2 topic hz /zed/zed_node/left/image_rect_gray`
-2. IMU publishing: `ros2 topic hz /zed/zed_node/imu/data`
-3. cuVSLAM node running: `ros2 node list | grep visual_slam`
-4. Check cuVSLAM logs for "Lost tracking" or initialization errors
-
-**Common fixes**:
-- Ensure camera has visible features (not pointing at blank wall during startup)
-- Check USB 3.0 connection (USB 2.0 bandwidth insufficient for stereo)
-- Verify `enable_imu_fusion: true` in `config/cuvslam.yaml`
-- Increase `img_jitter_threshold_ms` if frames are arriving with jitter
-
-### 3. TF chain broken (map → base_link fails)
-
-**Symptom**: `tf2_echo map base_link` returns "Could not transform".
-
-**Diagnosis** — check each link independently:
+If messages are still lost, increase `ReceiveBufferSize` and check kernel UDP buffer limits:
 ```bash
-ros2 run tf2_ros tf2_echo odom base_link      # cuVSLAM → should work first
-ros2 run tf2_ros tf2_echo map odom             # RTAB-Map → needs loop closure
-ros2 run tf2_ros tf2_echo base_link zed2i_base_link  # Static TF → always works
+sudo sysctl -w net.core.rmem_max=67108864
+sudo sysctl -w net.core.rmem_default=33554432
 ```
 
-**If `odom → base_link` broken**: cuVSLAM not publishing (see issue #2 above)
-**If `map → odom` broken**: RTAB-Map hasn't initialized yet or has no odometry input. Check that cuVSLAM odom is flowing and `publish_tf: true` in `config/rtabmap.yaml`.
+---
 
-### 4. No loop closures detected in greenhouse
+## 5. depth_filter_node High Latency
 
-**Symptom**: RTAB-Map builds nodes but `loop_closure_id` stays 0.
+**Symptom:** `/depth_filter/latency` reports values consistently above 60ms (WARN threshold) or above 100ms (ERROR threshold).
 
-**Checks**:
-1. Verify map has enough nodes (need >10-20 for spatial proximity to work)
-2. Check feature count: `ros2 topic echo /rtabmap/info` → look for words/features count
-3. Ensure robot revisits previously-mapped areas
+**Expected:** ~40ms per frame at HD1080 with default config (temporal=2, bilateral=off, hole_filling=off).
 
-**Tuning** (in `config/rtabmap.yaml`):
-```yaml
-Rtabmap/LoopThr: '0.09'              # Lower = more permissive (try 0.07 if still failing)
-RGBD/ProximityBySpace: 'true'        # Must be true for row-based environments
-Vis/MinInliers: '15'                 # Lower if features are sparse (try 10)
-RGBD/ProximityMaxGraphDepth: '50'    # Increase to search further back
-```
-
-### 5. Depth filter removing too many pixels
-
-**Symptom**: `/filtered/depth` image is mostly NaN/black, depth_filter logs show >50% removal.
-
-**Diagnosis**: Check raw depth first:
+**Diagnosis:**
 ```bash
-ros2 topic echo /zed/zed_node/depth/depth_registered --once | head -5
+# Monitor latency in real-time
+ros2 topic echo /depth_filter/latency
+
+# Check quality JSON for per-stage breakdown
+ros2 topic echo /depth_filter/quality
 ```
 
-**Fixes** (in `config/depth_filter.yaml`):
-- Increase `max_depth` if environment extends beyond 10m
-- Decrease `min_depth` below 0.3m only if using close-range ZED
-- Disable `enable_bilateral: false` temporarily to isolate cause
-- Adjust ZED confidence: raise `depth_confidence` in `config/zed2i.yaml` (50→70 = less strict)
+**Common causes and fixes:**
 
-### 6. High latency / frame drops
+| Cause | Fix |
+|-------|-----|
+| Thermal throttling | Run `sudo jetson_clocks`, improve cooling |
+| Bilateral filter enabled | Set `bilateral_filter.enabled: false` in depth_filter.yaml |
+| Hole filling enabled | Set `hole_filling.enabled: false` in depth_filter.yaml |
+| Temporal window too large | Reduce `temporal_filter.window_size` (default: 2) |
+| GPU memory pressure from nvblox | Check `tegrastats` for GPU memory usage |
+| Other CUDA workloads | Ensure no competing GPU processes |
 
-**Symptom**: Topics running below expected Hz, or `validate_slam.sh` shows low rates.
+**Latency threshold reference:**
+- OK: < 30ms
+- WARN: 30-60ms
+- ERROR: 60-100ms
+- CRITICAL: > 100ms
 
-**Checks**:
+---
+
+## 6. TF Stale / Transform Age Exceeded
+
+**Symptom:** Downstream nodes (nvblox, coverage_monitor) report stale transforms. `slam_monitor_node` shows TF age exceeding the 150ms threshold in `/slam/quality`.
+
+**Diagnosis:**
 ```bash
-# Check Jetson power mode
-sudo nvpmodel -q   # Should be: MAXN (mode 0)
-sudo jetson_clocks --show  # Clocks should be at max
+# Check TF publication rate
+ros2 topic hz /tf
 
-# Check thermal throttling
-cat /sys/devices/virtual/thermal/thermal_zone*/temp  # Should be <85000 (85C)
-
-# Check RAM
-free -h   # Should have significant free memory
+# Check latest transform age
+ros2 run tf2_ros tf2_echo odom base_link
 ```
 
-**Fixes**:
-- Run `scripts/jetson_setup.sh` (sets MAXN mode + locks clocks)
-- Ensure adequate ventilation / heatsink on Jetson
-- Reduce `grab_resolution` to VGA if thermal throttling persists
-- Disable `enable_hole_filling` (most expensive depth filter stage)
+**Common causes:**
 
-### 7. DDS communication issues
+1. **cuVSLAM lost tracking:** The VIO pipeline lost visual features.
+   - Check lighting conditions and camera exposure.
+   - Verify images are being published: `ros2 topic hz /zed/left/image_rect_color`
+   - Look for cuVSLAM tracking status messages.
 
-**Symptom**: Nodes running but topics not visible across nodes, or high latency.
+2. **ZED camera disconnected or lagging:**
+   - Check USB connection: `lsusb | grep -i stereolabs`
+   - Restart the ZED node or the full pipeline.
 
-**Checks**:
+3. **ZED node accidentally publishing TF:**
+   - Verify `publish_tf: false` in `zed2i.yaml`. If both ZED and cuVSLAM publish TF, the tree becomes inconsistent.
+
+**Fix:** If cuVSLAM loses tracking persistently, restart the pipeline via the watchdog or manually:
 ```bash
-echo $RMW_IMPLEMENTATION   # Must be: rmw_cyclonedds_cpp
-echo $CYCLONEDDS_URI       # Must point to config/cyclonedds.xml
-cat /tmp/cyclonedds.log    # Check for errors
+ros2 service call /watchdog/restart_pipeline std_srvs/srv/Trigger
 ```
 
-**Fixes**:
-- Ensure environment is set BEFORE launching nodes (launch file does this automatically)
-- Verify shared memory is enabled: check `cyclonedds.xml` has `<Enable>true</Enable>` under `<SharedMemory>`
-- Check `/dev/shm` has free space: `df -h /dev/shm`
+---
 
-### 8. RTAB-Map database errors
+## 7. nvblox No Mesh Output
 
-**Symptom**: RTAB-Map crashes or fails to start with database errors.
+**Symptom:** `/nvblox_node/mesh` and `/nvblox_node/map_slice` have zero subscribers or zero publication rate. The 3D reconstruction is empty.
 
-**Checks**:
+**Diagnosis:**
 ```bash
-ls -la /home/orza/slam_maps/greenhouse.db
-du -h /home/orza/slam_maps/greenhouse.db   # Check size
+ros2 topic hz /nvblox_node/mesh
+ros2 topic info /nvblox_node/mesh
+ros2 topic hz /depth_filter/filtered
 ```
 
-**Fixes**:
-- Ensure directory exists: `mkdir -p /home/orza/slam_maps`
-- For mapping mode, DB is deleted on start (`--delete_db_on_start`). If disk full, clear old DBs
-- For localization mode, the DB must exist and be valid. Re-run mapping first if needed
-- Check disk space: `df -h /home/orza/slam_maps/`
+**Common causes:**
 
-### 9. ZED camera not detected
+1. **Filtered depth not being published:** Check that `depth_filter_node` is running and publishing to `/depth_filter/filtered`.
 
-**Symptom**: `zed_node` fails to start or logs "No ZED camera detected".
+2. **TF not available:** nvblox requires valid transforms to project depth into the voxel grid. See "TF Stale" above.
 
-**Checks**:
+3. **nvblox not receiving depth:** Topic remapping may be incorrect. Verify that nvblox subscribes to `/depth_filter/filtered`, not `/zed/depth/depth_registered`.
+
+4. **Insufficient GPU memory:** nvblox requires significant GPU memory for the TSDF volume. Check `tegrastats` output.
+
+5. **nvblox crashed silently inside composable container:** Check container logs:
+   ```bash
+   ros2 component list /slam_container
+   ```
+
+---
+
+## 8. Python Scripts ImportError
+
+**Symptom:**
+```
+ImportError: No module named 'agv_greenhouse_msgs'
+```
+or similar import errors when launching `coverage_monitor.py` or `session_recorder.py`.
+
+**Cause:** The v3.0.0 scripts use only `std_msgs/String` and `std_srvs/Trigger`. If you see an `agv_greenhouse_msgs` import error, the script has not been updated to v3.0.0 or an old version is cached.
+
+**Fix:**
 ```bash
-lsusb | grep -i "2b03"    # ZED vendor ID
-ls /dev/video*             # Camera devices
+# Verify the correct script is installed
+grep -r "agv_greenhouse_msgs" install/
+# Should return NO results
+
+# Clean and rebuild
+rm -rf build/ install/ log/
+colcon build --packages-select jetson_deploy
+
+# Source the workspace
+source install/setup.bash
 ```
 
-**Fixes**:
-- Re-seat USB 3.0 cable (must be USB 3.0, not 2.0)
-- Check ZED SDK installation: `ZED_Explorer` should detect the camera
-- Ensure no other process has the camera open
-- Check `serial_number: 0` in `config/zed2i.yaml` (0 = auto-detect)
+If the scripts import only `std_msgs` and `std_srvs`, verify these packages are available:
+```bash
+ros2 pkg list | grep std_msgs
+ros2 pkg list | grep std_srvs
+```
 
-## Performance Baseline (Healthy Pipeline)
+---
 
-| Metric | Expected | Warning threshold |
-|--------|----------|-------------------|
-| RGB rate | ~30 Hz | < 10 Hz |
-| Depth rate | ~30 Hz | < 10 Hz |
-| IMU rate | ~400 Hz | < 100 Hz |
-| cuVSLAM odom rate | ~30 Hz | < 10 Hz |
-| cuVSLAM latency | ~1.8 ms | > 10 ms |
-| RTAB-Map processing | ~50 ms | > 200 ms |
-| Depth filter latency | < 1 ms | > 5 ms |
-| RAM usage (total) | 8-15 GB | > 50 GB |
-| GPU usage | ~20% | > 80% |
-| CPU (total) | 15-25% | > 80% |
+## 9. Launch Timing / Node Startup Ordering Issues
+
+**Symptom:** Nodes start before their dependencies are ready. Examples:
+- cuVSLAM starts before ZED camera is publishing
+- nvblox starts before cuVSLAM TF is available
+- Monitor/watchdog starts before pipeline is up
+
+**Cause:** The launch file uses `TimerAction` delays to sequence startup:
+
+| Delay | Node(s) |
+|-------|---------|
+| 0s | static_tf, slam_container (ZED) |
+| 3s | depth_filter_node |
+| 5s | cuVSLAM |
+| 8s | nvblox |
+| 10s | watchdog, slam_monitor |
+| 12s | coverage_monitor.py, session_recorder.py |
+
+**Fix:** If the Jetson is under heavy load (cold boot, other processes), these delays may be insufficient. Increase the TimerAction delays in the launch file. A safe multiplier is 1.5x-2x for cold boot scenarios.
+
+---
+
+## 10. IMU Drop Detection False Positives
+
+**Symptom:** `slam_monitor_node` reports IMU drops even though the IMU is functioning normally.
+
+**Cause:** The ZED 2i BMI085 IMU publishes data in bursts (multiple samples at once) rather than at a steady 400Hz. This burst behavior triggers naive drop detection.
+
+**Fix:** IMU drop detection is disabled by default in the v3.0.0 thresholds for exactly this reason. If it has been re-enabled, disable it:
+- Ensure the monitor config does not set IMU drop thresholds.
+- The Sensors group should only monitor camera frame rates (15/13/10 fps thresholds).
+
+---
+
+## 11. Frame Drop Rate Alarms
+
+**Symptom:** `/slam/quality` JSON reports high `drop_percent` values.
+
+**Thresholds (calibrated for 15fps):**
+- OK: 0% drops
+- WARN: 3% drops
+- ERROR: 10% drops
+
+**Diagnosis:** Check which topic is dropping frames via the quality JSON. Common causes:
+- USB bandwidth saturation
+- Thermal throttling reducing camera grab rate
+- DDS buffer overflow (see issue #4)
+
+---
+
+## 12. Foxglove Bridge Not Starting
+
+**Symptom:** Cannot connect Foxglove Studio to the robot.
+
+**Cause:** The Foxglove bridge is optional and controlled by the `enable_foxglove` launch argument.
+
+**Fix:**
+```bash
+ros2 launch jetson_deploy slam.launch.py enable_foxglove:=true
+```
+
+Ensure the `foxglove_bridge` package is installed:
+```bash
+sudo apt install ros-humble-foxglove-bridge
+```
+
+---
+
+## Quick Health Check
+
+Run these commands to verify the full pipeline is healthy:
+
+```bash
+# 1. Check all expected nodes are running
+ros2 node list | grep -E "zed|visual_slam|nvblox|depth_filter|monitor|watchdog|coverage|session"
+
+# 2. Check critical topic rates
+ros2 topic hz /zed/left/image_rect_color     # expect ~15Hz
+ros2 topic hz /visual_slam/tracking/odometry  # expect ~15Hz
+ros2 topic hz /depth_filter/filtered          # expect ~15Hz
+ros2 topic hz /slam/quality                   # expect ~1Hz
+
+# 3. Check TF is live
+ros2 run tf2_ros tf2_echo odom base_link
+
+# 4. Read diagnostic summary
+ros2 topic echo /slam/quality --once | python3 -m json.tool
+
+# 5. Check depth filter latency
+ros2 topic echo /depth_filter/latency --once
+# Should show data < 40ms typically
+```

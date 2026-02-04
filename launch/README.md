@@ -2,102 +2,75 @@
 
 ## agv_slam.launch.py — Main Pipeline
 
-Orchestrates the full SLAM pipeline with timed startup sequence.
+Orchestrates the full SLAM pipeline with timed startup sequence using `TimerAction` delays.
 
 ### Launch Arguments
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `localization` | `false` | `true` = localize on existing map, `false` = build new map |
-| `enable_rviz` | `false` | Launch RViz2 with pre-configured layout |
-| `database_path` | `/home/orza/slam_maps/greenhouse.db` | RTAB-Map SQLite database path |
-| `use_sim_time` | `false` | Use simulation clock |
+| `enable_foxglove` | `false` | Launch Foxglove WebSocket bridge on port 8765 |
+| `camera_x` | `0.1` | Camera forward offset from base_link (meters) |
+| `camera_y` | `0.0` | Camera lateral offset (meters) |
+| `camera_z` | `0.3` | Camera height above base_link (meters) |
+| `camera_pitch` | `0.087` | Camera downward tilt in radians (~5 degrees) |
 
 ### Environment Variables (set automatically)
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
-| `RMW_IMPLEMENTATION` | `rmw_cyclonedds_cpp` | Use CycloneDDS instead of FastDDS |
-| `CYCLONEDDS_URI` | `file://.../config/cyclonedds.xml` | DDS transport configuration |
+| `RMW_IMPLEMENTATION` | `rmw_cyclonedds_cpp` | Use CycloneDDS |
+| `CYCLONEDDS_URI` | `file://.../config/cyclonedds.xml` | DDS config path |
 
 ### Node Launch Order
 
 ```
-t=0s   ┌── Static TF (base_link → zed2i_base_link)
-       ├── ZED 2i camera driver
-t=3s   ├── Depth Filter Node
-t=5s   ├── cuVSLAM (GPU VIO)
-t=8s   ├── RTAB-Map (mapping OR localization, conditional)
-t=10s  ├── SLAM Monitor
-t=0s   └── RViz (if enable_rviz:=true)
+t=0s   ┌── Static TF publisher (base_link → zed_camera_link)
+       ├── component_container_mt (hosts ZED + cuVSLAM + nvblox)
+t=3s   ├── depth_filter_node (C++ standalone)
+t=5s   ├── cuVSLAM (composable, loaded into container)
+t=8s   ├── nvblox (composable, loaded into container)
+t=10s  ├── pipeline_watchdog_node (C++ standalone)
+       ├── slam_monitor_node (C++ standalone)
+t=12s  ├── coverage_monitor.py (Python)
+       └── session_recorder.py (Python)
+(if enabled) foxglove_bridge
 ```
 
-Delays are implemented via `TimerAction` to ensure upstream nodes are publishing before downstream consumers start.
+### Composable Container
 
-### Mapping vs Localization Mode
+ZED, cuVSLAM, and nvblox run as composable nodes in `component_container_mt` (multi-threaded).
 
-**Mapping** (`localization:=false`, default):
-- RTAB-Map starts with `--delete_db_on_start` (fresh map)
-- `Mem/IncrementalMemory: true` (adds new nodes)
+**IPC is disabled**:
+- ZED launch args include `'enable_ipc': 'false'`
+- cuVSLAM and nvblox use `extra_arguments=[{'use_intra_process_comms': False}]`
 
-**Localization** (`localization:=true`):
-- RTAB-Map loads existing database (no `--delete_db_on_start`)
-- `Mem/IncrementalMemory: false` (read-only map)
-- `Mem/InitWMWithAllNodes: true` (load entire map to RAM)
+This is required because ZED wrapper creates transient_local QoS publishers that conflict with IPC's volatile-only requirement.
 
 ### Topic Remappings
 
 **cuVSLAM** receives stereo + IMU:
 ```
-visual_slam/image_0      ← /zed/zed_node/left/image_rect_gray
+visual_slam/image_0       ← /zed/zed_node/left/image_rect_gray
 visual_slam/camera_info_0 ← /zed/zed_node/left/camera_info
-visual_slam/image_1      ← /zed/zed_node/right/image_rect_gray
+visual_slam/image_1       ← /zed/zed_node/right/image_rect_gray
 visual_slam/camera_info_1 ← /zed/zed_node/right/camera_info
-visual_slam/imu          ← /zed/zed_node/imu/data
+visual_slam/imu           ← /zed/zed_node/imu/data
 ```
 
-**RTAB-Map** receives filtered RGB-D + external odometry + IMU:
+**nvblox** receives depth + RGB + odometry:
 ```
-rgb/image        ← /filtered/rgb
-depth/image      ← /filtered/depth
-rgb/camera_info  ← /filtered/camera_info
-odom             ← /visual_slam/tracking/odometry
-imu              ← /zed/zed_node/imu/data
+depth/image     ← /zed/zed_node/depth/depth_registered
+color/image     ← /zed/zed_node/rgb/image_rect_color
+color/camera_info ← /zed/zed_node/rgb/color/rect/camera_info
 ```
 
 ### Static Transform
 
-`base_link → zed2i_base_link`:
+`base_link → zed_camera_link`:
 - x=0.1m (forward), y=0.0m, z=0.3m (up)
 - pitch=0.087 rad (~5 degrees downward tilt)
-- Adjust these values to match your physical camera mount
+- Override via launch arguments: `camera_x`, `camera_y`, `camera_z`, `camera_pitch`
 
-## monitor.launch.py — Visualization
+### Foxglove Bridge
 
-Launches two nodes:
-1. **RViz2** with `rviz/slam.rviz` — shows TF, occupancy grid, point cloud, images, odometry, path
-2. **rqt_topic** — real-time topic browser for debugging rates and data
-
-No arguments. Connects to already-running pipeline topics.
-
-## Adding a Node to the Launch
-
-1. Import `Node` and `TimerAction` (already imported)
-2. Define the node with config file, remappings, and output:
-   ```python
-   new_node = TimerAction(
-       period=X.0,  # seconds delay (after dependencies are publishing)
-       actions=[
-           Node(
-               package='agv_slam',
-               executable='new_node_name',
-               name='new_node',
-               parameters=[os.path.join(pkg_agv_slam, 'config', 'new_node.yaml')],
-               remappings=[...],
-               output='screen',
-           ),
-       ]
-   )
-   ```
-3. Add to the `LaunchDescription` list at the appropriate position
-4. Choose delay period based on what topics the node needs (see launch order above)
+When `enable_foxglove:=true`, launches `foxglove_bridge` with a whitelist of relevant topics for web visualization at `ws://<jetson_ip>:8765`.
